@@ -1013,7 +1013,7 @@ describe("codex execute", () => {
   // `[apps.*]`, `[apps.*.tools.*]`, and `[mcp_servers.*]` curated blocks) lands in
   // `prepareManagedCodexHome`. This test encodes the Directive 1 default-deny contract
   // and will remain red until the CP4 sanitization helper is wired.
-  it.skip("sanitizes config.toml to strip openai-curated connector blocks when inheritedConnectors is empty (GHSA-gqqj-85qm-8qhf Directive 1)", async () => {
+  it("sanitizes config.toml to strip openai-curated connector blocks when inheritedConnectors is empty (GHSA-gqqj-85qm-8qhf Directive 1)", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-sanitize-default-deny-"));
     const workspace = path.join(root, "workspace");
     const commandPath = path.join(root, "codex");
@@ -1141,7 +1141,7 @@ describe("codex execute", () => {
   // `destructive_enabled = false` unless `allowWrite` includes the connector).
   // This test encodes the Directive 1 opt-in contract and will remain red until
   // the CP4 allowlist-aware materialization lands.
-  it.skip("re-enables minimum [apps.<name>] block for connectors listed in inheritedConnectors.allowRead (GHSA-gqqj-85qm-8qhf Directive 1 opt-in)", async () => {
+  it("re-enables minimum [apps.<name>] block for connectors listed in inheritedConnectors.allowRead (GHSA-gqqj-85qm-8qhf Directive 1 opt-in)", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-reenable-allow-read-"));
     const workspace = path.join(root, "workspace");
     const commandPath = path.join(root, "codex");
@@ -1249,7 +1249,7 @@ describe("codex execute", () => {
   // write-classified tool is invoked without `inheritedConnectors.allowWrite`
   // coverage, and (c) emits a `denied` audit record via `emitConnectorAuditRecord`
   // BEFORE propagating the event. Encodes the Directive 2 PoC contract.
-  it.skip("denies mcp__codex_apps__gmail_send_email at the runtime gate and emits denied audit + SIGTERM (GHSA-gqqj-85qm-8qhf Directive 2 PoC)", async () => {
+  it("denies mcp__codex_apps__gmail_send_email at the runtime gate and emits denied audit + SIGTERM (GHSA-gqqj-85qm-8qhf Directive 2 PoC)", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-gate-deny-"));
     const workspace = path.join(root, "workspace");
     const commandPath = path.join(root, "codex");
@@ -1375,7 +1375,7 @@ describe("codex execute", () => {
   // connector is not present in `inheritedConnectors.allowRead`, returns a named
   // authorization error, and emits a `denied` audit record. Encodes the Directive 1
   // PoC contract for read-classified connector tools.
-  it.skip("denies all mcp__codex_apps__gmail_* reads under default-deny (GHSA-gqqj-85qm-8qhf Directive 1 PoC: reads)", async () => {
+  it("denies all mcp__codex_apps__gmail_* reads under default-deny (GHSA-gqqj-85qm-8qhf Directive 1 PoC: reads)", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-gate-deny-read-"));
     const workspace = path.join(root, "workspace");
     const commandPath = path.join(root, "codex");
@@ -1485,7 +1485,7 @@ describe("codex execute", () => {
   // `allowed` audit record via `emitConnectorAuditRecord` BEFORE the event
   // propagates (per Directive 4 timing discipline). Encodes the Directive 5
   // regression criterion — confirms the fix is a gate, not a blanket disablement.
-  it.skip("allows gmail_send_email when inheritedConnectors.allowWrite includes gmail and emits allowed audit (GHSA-gqqj-85qm-8qhf Directive 5 regression criterion)", async () => {
+  it("allows gmail_send_email when inheritedConnectors.allowWrite includes gmail and emits allowed audit (GHSA-gqqj-85qm-8qhf Directive 5 regression criterion)", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-gate-allow-write-"));
     const workspace = path.join(root, "workspace");
     const commandPath = path.join(root, "codex");
