@@ -41,6 +41,16 @@ export function buildCodexExecArgs(
   const search = asBoolean(record.search, false);
   const fastModeRequested = asBoolean(record.fastMode, false);
   const fastModeApplied = fastModeRequested && isCodexLocalFastModeSupported(model);
+  // SECURITY INVARIANT (GHSA-gqqj-85qm-8qhf):
+  // This file MUST NEVER synthesize a default `true` for
+  // `dangerouslyBypassApprovalsAndSandbox`. It only propagates the caller's
+  // explicit choice. The config-level default is controlled by
+  // DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX in ../index.ts
+  // (set to `false` as part of the remediation) and applied upstream in
+  // src/ui/build-config.ts and server/src/routes/agents.ts.
+  // The fallback `asBoolean(record.dangerouslyBypassSandbox, false)` on the
+  // next line preserves backward compatibility with the legacy field name
+  // while keeping the terminal default at `false`.
   const bypass = asBoolean(
     record.dangerouslyBypassApprovalsAndSandbox,
     asBoolean(record.dangerouslyBypassSandbox, false),
