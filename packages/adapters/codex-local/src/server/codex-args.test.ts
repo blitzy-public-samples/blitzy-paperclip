@@ -44,3 +44,50 @@ describe("buildCodexExecArgs", () => {
     ]);
   });
 });
+
+describe("buildCodexExecArgs bypass approvals and sandbox (GHSA-gqqj-85qm-8qhf)", () => {
+  it("does NOT append --dangerously-bypass-approvals-and-sandbox when dangerouslyBypassApprovalsAndSandbox is false", () => {
+    const result = buildCodexExecArgs({
+      model: "gpt-5.4",
+      dangerouslyBypassApprovalsAndSandbox: false,
+    });
+
+    expect(result.args).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+  });
+
+  it("does NOT append --dangerously-bypass-approvals-and-sandbox when dangerouslyBypassApprovalsAndSandbox is omitted", () => {
+    const result = buildCodexExecArgs({
+      model: "gpt-5.4",
+    });
+
+    expect(result.args).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+  });
+
+  it("does NOT append --dangerously-bypass-approvals-and-sandbox when both bypass fields are false", () => {
+    const result = buildCodexExecArgs({
+      model: "gpt-5.4",
+      dangerouslyBypassApprovalsAndSandbox: false,
+      dangerouslyBypassSandbox: false,
+    });
+
+    expect(result.args).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+  });
+
+  it("DOES append --dangerously-bypass-approvals-and-sandbox when dangerouslyBypassApprovalsAndSandbox is explicitly true", () => {
+    const result = buildCodexExecArgs({
+      model: "gpt-5.4",
+      dangerouslyBypassApprovalsAndSandbox: true,
+    });
+
+    expect(result.args).toContain("--dangerously-bypass-approvals-and-sandbox");
+  });
+
+  it("DOES append --dangerously-bypass-approvals-and-sandbox when legacy field dangerouslyBypassSandbox is explicitly true", () => {
+    const result = buildCodexExecArgs({
+      model: "gpt-5.4",
+      dangerouslyBypassSandbox: true,
+    });
+
+    expect(result.args).toContain("--dangerously-bypass-approvals-and-sandbox");
+  });
+});
