@@ -33,6 +33,7 @@ export type {
   CLIAdapterModule,
   CreateConfigValues,
   InheritedConnectorsConfig,
+  ConnectorAuditRecord,
 } from "./types.js";
 export type {
   SessionCompactionPolicy,
