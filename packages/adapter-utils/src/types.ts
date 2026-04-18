@@ -422,4 +422,75 @@ export interface CreateConfigValues {
   intervalSec: number;
   /** Arbitrary key-value pairs populated by schema-driven config fields. */
   adapterSchemaValues?: Record<string, unknown>;
+  /**
+   * Per-agent opt-in allowlists for inherited ChatGPT/OpenAI-curated connectors
+   * in the codex_local adapter runtime. Omitted is semantically equivalent to
+   * `{ allowRead: [], allowWrite: [] }` (default-deny). Added as part of
+   * GHSA-gqqj-85qm-8qhf remediation.
+   */
+  inheritedConnectors?: InheritedConnectorsConfig;
+}
+
+// ---------------------------------------------------------------------------
+// Inherited connectors opt-in (GHSA-gqqj-85qm-8qhf remediation)
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-agent opt-in allowlists for inherited ChatGPT/OpenAI-curated connectors in
+ * the codex_local adapter runtime. Added as part of GHSA-gqqj-85qm-8qhf remediation.
+ *
+ * Default semantics: an omitted `inheritedConnectors` is treated as
+ * `{ allowRead: [], allowWrite: [] }` — i.e., default-deny for all connector
+ * invocations. An agent must explicitly list connector names (e.g., "gmail",
+ * "gcal", "drive", "github", "linear") in the allowRead and/or allowWrite
+ * arrays to grant the corresponding authority.
+ *
+ * Read and write are independent gates: read opt-in does NOT imply write opt-in.
+ * Write-classified tool invocations (send_*, create_*, delete_*, update_*, etc.)
+ * require the connector to be in `allowWrite`. Read-classified tool invocations
+ * (get_*, search_*, list_*, etc.) require the connector to be in `allowRead`.
+ */
+export interface InheritedConnectorsConfig {
+  /** Connector names (e.g., "gmail") whose read-classified tools may be invoked. */
+  allowRead?: string[];
+  /** Connector names whose write-classified tools may be invoked. */
+  allowWrite?: string[];
+}
+
+/**
+ * Structured audit record emitted for every connector-mediated tool invocation
+ * from a codex_local agent runtime. Added as part of GHSA-gqqj-85qm-8qhf
+ * remediation (AAP directive 4).
+ *
+ * One record is emitted per invocation:
+ *   - `outcome: "allowed"` — emitted BEFORE the connector action executes
+ *   - `outcome: "denied"` — emitted at denial time, with `reason` naming the
+ *     missing opt-in or the default-block
+ *   - `outcome: "error"` — emitted on exceptional gate failures
+ *
+ * Records are routed to the activityLog table via logActivity() with
+ * action = "codex.connector.invoked", and mirrored as single-line JSON
+ * into the run's stderr stream for forensic replay.
+ */
+export interface ConnectorAuditRecord {
+  /** ISO 8601 timestamp. */
+  ts: string;
+  /** Agent ID that initiated the invocation. */
+  agentId: string;
+  /** Run ID for the active execution. */
+  runId: string;
+  /** Provenance of the connector: OpenAI-curated (inherited from ~/.codex) or Paperclip-native. */
+  connectorSource: "openai-curated" | "paperclip-native";
+  /** Short connector name (e.g., "gmail", "gcal", "drive"). */
+  connectorName: string;
+  /** Full tool name as emitted by the Codex CLI (e.g., "mcp__codex_apps__gmail_send_email"). */
+  toolName: string;
+  /** Action classification: read-only (get_*, search_*, list_*, ...) vs. write (send_*, create_*, update_*, delete_*, ...). Ambiguous tools classify as write (fail-closed). */
+  classification: "read" | "write";
+  /** Snapshot of the agent's opt-in lists at invocation time. */
+  optInState: { allowRead: string[]; allowWrite: string[] };
+  /** Final outcome of the gate decision. */
+  outcome: "allowed" | "denied" | "error";
+  /** For denied/error outcomes, a short human-readable explanation (e.g., "connector not in allowWrite"). */
+  reason?: string;
 }
