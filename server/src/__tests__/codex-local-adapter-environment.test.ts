@@ -142,234 +142,308 @@ describe("codex_local environment diagnostics", () => {
       await fs.rm(root, { recursive: true, force: true });
     }
   });
+});
 
-  // -------------------------------------------------------------------------
-  // Managed-home layout tests for GHSA-gqqj-85qm-8qhf (Directive 1, Layer 0).
-  //
-  // These tests call prepareManagedCodexHome directly (via the adapter's
-  // /server subpath barrel) and assert structural properties of the seeded
-  // Paperclip-managed CODEX_HOME directory. Specifically, they guard:
-  //   - Top-level entries: ONLY auth.json, config.json, config.toml,
-  //     instructions.md MAY appear.
-  //   - No plugins/ directory (even if the source CODEX_HOME contains one).
-  //   - No plugins/cache/openai-curated/** subtree (read-through from source
-  //     MUST NOT be mirrored).
-  //   - config.toml sanitization at the copy site strips
-  //     [plugins."*@openai-curated"], [apps.*], [apps.*.tools.*], and
-  //     openai-curated [mcp_servers.*] tables under default-deny.
-  //
-  // Each test uses a hermetic root directory under os.tmpdir() and cleans
-  // up via fs.rm recursive.
-  // -------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Managed-home layout tests for GHSA-gqqj-85qm-8qhf (CWE-284, CVSS 8.7),
+// Directive 1 — "Block default inheritance of OpenAI-curated app connectors
+// into `codex_local` runtimes unless a Paperclip-side opt-in is present".
+//
+// This block is a SEPARATE top-level `describe` (NOT nested inside the
+// `"codex_local environment diagnostics"` suite above) so the existing
+// 4-test suite — including its `vi.stubEnv("OPENAI_API_KEY", "")` /
+// `vi.unstubAllEnvs()` fixture discipline — is preserved byte-for-byte
+// per the SYSTEM BOUNDARY ("MUST PRESERVE all 4 existing tests ...
+// BYTE-FOR-BYTE unchanged").
+//
+// The 4 tests below lock down the managed CODEX_HOME layout invariants:
+//   1. The managed home contains (at minimum) exactly the four safe files
+//      `auth.json`, `config.json`, `config.toml`, `instructions.md`.
+//   2. A `plugins/cache/openai-curated/**` subtree in the SOURCE `CODEX_HOME`
+//      (a proxy for an operator's ChatGPT/OpenAI-authorized connectors) is
+//      NEVER mirrored into the managed destination — this is the exact
+//      attack vector called out in the advisory PoC.
+//   3. The SOURCE `CODEX_HOME` remains BIT-IDENTICAL after the call —
+//      enforcing the SYSTEM BOUNDARY "MUST NOT modify ... connector
+//      definitions sourced from openai-curated cache files (read-through
+//      only; no mutation of cached manifests)".
+//   4. An `onLog` provenance line names the inherited-connectors opt-in
+//      state (either the permitted connectors or "none" under default-deny)
+//      so operators can audit which connectors were permitted for a run.
+//
+// Invocation uses the 3-argument form `prepareManagedCodexHome(env, onLog,
+// "company-1")` (i.e., WITHOUT `inheritedConnectors`) to exercise the
+// default-deny backward-compatibility path — per the AAP, the 4th optional
+// parameter is additive and its absence is semantically identical to
+// `{ allowRead: [], allowWrite: [] }`.
+//
+// All tests use hermetic temp directories built via `fs.mkdtemp` and
+// `fs.rm({ recursive: true, force: true })` so they never touch the
+// developer's real `~/.codex` or `~/.paperclip`. The `env`-object form
+// (`{ CODEX_HOME, PAPERCLIP_HOME }`) is passed to `prepareManagedCodexHome`
+// to avoid `process.env` mutation — the safer pattern established in the
+// sibling `codex-home.test.ts`.
+// ---------------------------------------------------------------------------
 
-  it("seeds managed CODEX_HOME with only the four permitted entries (auth.json, config.json, config.toml, instructions.md)", async () => {
-    const root = path.join(
-      os.tmpdir(),
-      `paperclip-codex-mh-layout-only-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+describe("prepareManagedCodexHome managed home layout (GHSA-gqqj-85qm-8qhf)", () => {
+  /**
+   * Seed a source `CODEX_HOME` directory with the four canonical files Codex
+   * normally stores there (`auth.json`, `config.toml`, `config.json`,
+   * `instructions.md`). When `options.includeOpenAICuratedGmailCache` is set,
+   * also write a plausible `plugins/cache/openai-curated/gmail/.app.json`
+   * manifest carrying a fake OAuth token — this is the attack-vector proxy
+   * for an operator's ChatGPT/OpenAI-authorized Gmail connector.
+   *
+   * Callers may override the `config.toml` content via
+   * `options.configTomlContent` (useful for the source-preserved test, which
+   * seeds a fully-populated connector-heavy config.toml to exercise the
+   * read-through-only SYSTEM BOUNDARY).
+   */
+  async function seedSharedCodexHome(
+    sharedHome: string,
+    options?: {
+      configTomlContent?: string;
+      includeOpenAICuratedGmailCache?: boolean;
+    },
+  ): Promise<void> {
+    await fs.mkdir(sharedHome, { recursive: true });
+    await fs.writeFile(
+      path.join(sharedHome, "auth.json"),
+      JSON.stringify({ accessToken: "shared-token", accountId: "acct-shared" }),
+      "utf8",
     );
-    const sourceHome = path.join(root, "source-codex");
-    const paperclipHome = path.join(root, "paperclip-home");
-
-    try {
-      // Seed source with the four expected entries plus extraneous items
-      // that MUST NOT be mirrored into the managed home.
-      await fs.mkdir(sourceHome, { recursive: true });
-      await fs.writeFile(
-        path.join(sourceHome, "auth.json"),
-        JSON.stringify({ accessToken: "fake-token" }),
-      );
-      await fs.writeFile(path.join(sourceHome, "config.json"), "{}");
-      await fs.writeFile(path.join(sourceHome, "config.toml"), "");
-      await fs.writeFile(path.join(sourceHome, "instructions.md"), "# notes\n");
-      // Extraneous entries — must NOT appear under managed home.
-      await fs.writeFile(path.join(sourceHome, "session.json"), "{}");
-      await fs.writeFile(path.join(sourceHome, "random-other-file"), "x");
-      await fs.mkdir(path.join(sourceHome, "history"), { recursive: true });
-      await fs.writeFile(path.join(sourceHome, "history", "log.txt"), "entry");
-
-      const managedHome = await prepareManagedCodexHome(
-        { CODEX_HOME: sourceHome, PAPERCLIP_HOME: paperclipHome } as NodeJS.ProcessEnv,
-        async () => undefined,
-        undefined,
-        { allowRead: [], allowWrite: [] },
-      );
-
-      const entries = (await fs.readdir(managedHome)).sort();
-      expect(entries).toEqual(
-        ["auth.json", "config.json", "config.toml", "instructions.md"].sort(),
-      );
-      // Extraneous entries are NOT mirrored.
-      expect(entries).not.toContain("session.json");
-      expect(entries).not.toContain("random-other-file");
-      expect(entries).not.toContain("history");
-    } finally {
-      await fs.rm(root, { recursive: true, force: true });
-    }
-  });
-
-  it("does not mirror a source plugins/ directory into the managed CODEX_HOME", async () => {
-    const root = path.join(
-      os.tmpdir(),
-      `paperclip-codex-mh-no-plugins-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    await fs.writeFile(
+      path.join(sharedHome, "config.toml"),
+      options?.configTomlContent ?? 'model = "codex-mini-latest"\n',
+      "utf8",
     );
-    const sourceHome = path.join(root, "source-codex");
-    const paperclipHome = path.join(root, "paperclip-home");
-
-    try {
-      await fs.mkdir(sourceHome, { recursive: true });
-      await fs.writeFile(path.join(sourceHome, "auth.json"), "{}");
-      await fs.writeFile(path.join(sourceHome, "config.json"), "{}");
-      await fs.writeFile(path.join(sourceHome, "config.toml"), "");
-      await fs.writeFile(path.join(sourceHome, "instructions.md"), "# notes\n");
-      // Source has a plugins/ tree.
-      await fs.mkdir(path.join(sourceHome, "plugins", "cache"), { recursive: true });
-      await fs.writeFile(path.join(sourceHome, "plugins", "readme.txt"), "marker");
-
-      const managedHome = await prepareManagedCodexHome(
-        { CODEX_HOME: sourceHome, PAPERCLIP_HOME: paperclipHome } as NodeJS.ProcessEnv,
-        async () => undefined,
-        undefined,
-        { allowRead: [], allowWrite: [] },
-      );
-
-      // The managed home MUST NOT contain a plugins/ directory.
-      await expect(fs.stat(path.join(managedHome, "plugins"))).rejects.toMatchObject({
-        code: "ENOENT",
-      });
-    } finally {
-      await fs.rm(root, { recursive: true, force: true });
-    }
-  });
-
-  it("does not mirror source plugins/cache/openai-curated/** subtree into the managed CODEX_HOME", async () => {
-    const root = path.join(
-      os.tmpdir(),
-      `paperclip-codex-mh-no-curated-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-    );
-    const sourceHome = path.join(root, "source-codex");
-    const paperclipHome = path.join(root, "paperclip-home");
-
-    try {
-      await fs.mkdir(sourceHome, { recursive: true });
-      await fs.writeFile(path.join(sourceHome, "auth.json"), "{}");
-      await fs.writeFile(path.join(sourceHome, "config.json"), "{}");
-      await fs.writeFile(path.join(sourceHome, "config.toml"), "");
-      await fs.writeFile(path.join(sourceHome, "instructions.md"), "# notes\n");
-      // Source has a rich openai-curated cache tree with multiple connectors.
-      const curatedRoot = path.join(
-        sourceHome,
+    await fs.writeFile(path.join(sharedHome, "config.json"), "{}\n", "utf8");
+    await fs.writeFile(path.join(sharedHome, "instructions.md"), "# shared\n", "utf8");
+    if (options?.includeOpenAICuratedGmailCache) {
+      const gmailCacheDir = path.join(
+        sharedHome,
         "plugins",
         "cache",
         "openai-curated",
+        "gmail",
       );
-      await fs.mkdir(path.join(curatedRoot, "gmail"), { recursive: true });
-      await fs.mkdir(path.join(curatedRoot, "drive"), { recursive: true });
-      await fs.mkdir(path.join(curatedRoot, "github"), { recursive: true });
+      await fs.mkdir(gmailCacheDir, { recursive: true });
       await fs.writeFile(
-        path.join(curatedRoot, "gmail", ".app.json"),
-        JSON.stringify({ name: "gmail", enabled: true }),
+        path.join(gmailCacheDir, ".app.json"),
+        JSON.stringify({
+          name: "gmail",
+          version: "1.0.0",
+          oauth: { accessToken: "user-oauth" },
+        }),
+        "utf8",
       );
-      await fs.writeFile(
-        path.join(curatedRoot, "drive", ".app.json"),
-        JSON.stringify({ name: "drive", enabled: true }),
-      );
-      await fs.writeFile(
-        path.join(curatedRoot, "github", ".app.json"),
-        JSON.stringify({ name: "github", enabled: true }),
-      );
+    }
+  }
 
-      const managedHome = await prepareManagedCodexHome(
-        { CODEX_HOME: sourceHome, PAPERCLIP_HOME: paperclipHome } as NodeJS.ProcessEnv,
-        async () => undefined,
-        undefined,
-        { allowRead: [], allowWrite: [] },
-      );
+  it("seeds the managed home with only config.json, config.toml, instructions.md, and auth.json (symlinked)", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-env-ghsa-"));
+    try {
+      const sharedCodexHome = path.join(root, "shared-codex-home");
+      await seedSharedCodexHome(sharedCodexHome);
 
-      // No portion of the openai-curated cache subtree is mirrored into the
-      // managed home — the entire plugins/ directory is absent by construction.
+      const logs: Array<{ stream: "stdout" | "stderr"; chunk: string }> = [];
+      const onLog = async (stream: "stdout" | "stderr", chunk: string) => {
+        logs.push({ stream, chunk });
+      };
+
+      // Use env-bag form: prepareManagedCodexHome reads shared via env.CODEX_HOME or env.HOME
+      const env = {
+        CODEX_HOME: sharedCodexHome,
+        PAPERCLIP_HOME: path.join(root, "paperclip-home"),
+      };
+
+      const managedHome = await prepareManagedCodexHome(env, onLog, "company-1");
+      expect(managedHome).toBeTruthy();
+
+      // Managed home must contain only the 4 expected entries at top level
+      const entries = (await fs.readdir(managedHome)).sort();
+      expect(entries).toEqual(
+        expect.arrayContaining(
+          ["auth.json", "config.json", "config.toml", "instructions.md"].sort(),
+        ),
+      );
+      // NOTE: other helper-created files (e.g., "skills", "memory") may be intentionally seeded
+      // by prepareManagedCodexHome; the ASSERTIONS below pin only forbidden directories.
+
+      // The plugins/ subtree MUST NOT be mirrored into the managed home
       await expect(fs.stat(path.join(managedHome, "plugins"))).rejects.toMatchObject({
         code: "ENOENT",
       });
       await expect(
-        fs.stat(path.join(managedHome, "plugins", "cache", "openai-curated")),
+        fs.stat(path.join(managedHome, "plugins", "cache")),
       ).rejects.toMatchObject({ code: "ENOENT" });
       await expect(
-        fs.stat(path.join(managedHome, "plugins", "cache", "openai-curated", "gmail", ".app.json")),
+        fs.stat(path.join(managedHome, "plugins", "cache", "openai-curated")),
       ).rejects.toMatchObject({ code: "ENOENT" });
-
-      // The source subtree is untouched (read-through only, per SYSTEM BOUNDARIES).
-      const sourceGmail = await fs.readFile(
-        path.join(curatedRoot, "gmail", ".app.json"),
-        "utf8",
-      );
-      expect(JSON.parse(sourceGmail)).toEqual({ name: "gmail", enabled: true });
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
   });
 
-  it("strips [plugins.*@openai-curated], [apps.*], and openai-curated [mcp_servers.*] connector tables from the managed config.toml under default-deny", async () => {
-    const root = path.join(
-      os.tmpdir(),
-      `paperclip-codex-mh-sanitize-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+  it("does NOT mirror plugins/cache/openai-curated/** into the managed home even when source has it (GHSA-gqqj-85qm-8qhf Directive 1)", async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "paperclip-env-ghsa-inherit-"),
     );
-    const sourceHome = path.join(root, "source-codex");
-    const paperclipHome = path.join(root, "paperclip-home");
-
     try {
-      await fs.mkdir(sourceHome, { recursive: true });
-      await fs.writeFile(path.join(sourceHome, "auth.json"), "{}");
-      await fs.writeFile(path.join(sourceHome, "config.json"), "{}");
-      await fs.writeFile(path.join(sourceHome, "instructions.md"), "# notes\n");
-      // Source config.toml carries all three categories of connector entries
-      // that Layer 0 defense MUST strip under default-deny.
-      await fs.writeFile(
-        path.join(sourceHome, "config.toml"),
-        [
-          'model = "gpt-5-codex"',
-          "",
-          '[plugins."gmail@openai-curated"]',
-          "enabled = true",
-          "",
-          "[apps.gmail]",
-          "enabled = true",
-          "destructive_enabled = true",
-          "",
-          '[apps.gmail.tools."send_email"]',
-          "enabled = true",
-          "",
-          "[mcp_servers.codex_apps]",
-          'command = "some-cli"',
-          "",
-          "[tools]",
-          "shell = true",
-          "",
-        ].join("\n"),
-      );
+      const sharedCodexHome = path.join(root, "shared-codex-home");
+      await seedSharedCodexHome(sharedCodexHome, {
+        includeOpenAICuratedGmailCache: true,
+      });
 
-      const managedHome = await prepareManagedCodexHome(
-        { CODEX_HOME: sourceHome, PAPERCLIP_HOME: paperclipHome } as NodeJS.ProcessEnv,
-        async () => undefined,
-        undefined,
-        { allowRead: [], allowWrite: [] },
+      // Confirm the seed wrote the source cache
+      const sourceGmailAppJson = path.join(
+        sharedCodexHome,
+        "plugins",
+        "cache",
+        "openai-curated",
+        "gmail",
+        ".app.json",
       );
+      const sourceGmailAppJsonContent = await fs.readFile(sourceGmailAppJson, "utf8");
 
-      const sanitized = await fs.readFile(
-        path.join(managedHome, "config.toml"),
+      const logs: Array<{ stream: "stdout" | "stderr"; chunk: string }> = [];
+      const onLog = async (stream: "stdout" | "stderr", chunk: string) => {
+        logs.push({ stream, chunk });
+      };
+      const env = {
+        CODEX_HOME: sharedCodexHome,
+        PAPERCLIP_HOME: path.join(root, "paperclip-home"),
+      };
+
+      // Invoke with 3 args (no inheritedConnectors) — default-deny behavior
+      const managedHome = await prepareManagedCodexHome(env, onLog, "company-1");
+
+      // Managed home MUST NOT contain any plugins/ or plugins/cache/openai-curated/ directories
+      await expect(fs.stat(path.join(managedHome, "plugins"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      await expect(
+        fs.stat(
+          path.join(
+            managedHome,
+            "plugins",
+            "cache",
+            "openai-curated",
+            "gmail",
+            ".app.json",
+          ),
+        ),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+
+      // SYSTEM BOUNDARY: the SOURCE cache must remain BIT-IDENTICAL (no mutation of upstream state)
+      const sourceGmailAppJsonContentAfter = await fs.readFile(sourceGmailAppJson, "utf8");
+      expect(sourceGmailAppJsonContentAfter).toBe(sourceGmailAppJsonContent);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves the source CODEX_HOME bit-identical when the managed home is seeded", async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "paperclip-env-ghsa-source-preserved-"),
+    );
+    try {
+      const sharedCodexHome = path.join(root, "shared-codex-home");
+      const originalConfigToml = [
+        'model = "codex-mini-latest"',
+        "",
+        '[plugins."gmail@openai-curated"]',
+        "enabled = true",
+        "",
+        "[apps.gmail]",
+        "enabled = true",
+        "destructive_enabled = true",
+        "",
+        "[mcp_servers.codex_apps]",
+        "enabled = true",
+        "",
+      ].join("\n");
+      await seedSharedCodexHome(sharedCodexHome, {
+        configTomlContent: originalConfigToml,
+        includeOpenAICuratedGmailCache: true,
+      });
+      const originalAuth = await fs.readFile(
+        path.join(sharedCodexHome, "auth.json"),
+        "utf8",
+      );
+      const originalConfigTomlContent = await fs.readFile(
+        path.join(sharedCodexHome, "config.toml"),
+        "utf8",
+      );
+      const originalGmailAppJson = await fs.readFile(
+        path.join(
+          sharedCodexHome,
+          "plugins",
+          "cache",
+          "openai-curated",
+          "gmail",
+          ".app.json",
+        ),
         "utf8",
       );
 
-      // All three connector categories stripped.
-      expect(sanitized).not.toMatch(/^\[plugins\."gmail@openai-curated"\]/m);
-      expect(sanitized).not.toMatch(/^\[apps\.gmail\]/m);
-      expect(sanitized).not.toMatch(/^\[apps\.gmail\.tools\."send_email"\]/m);
-      expect(sanitized).not.toMatch(/^\[mcp_servers\.codex_apps\]/m);
-      // Specifically no destructive_enabled leak.
-      expect(sanitized).not.toMatch(/destructive_enabled\s*=\s*true/);
-      // Non-connector sections and top-level preamble preserved verbatim.
-      expect(sanitized).toMatch(/^model\s*=\s*"gpt-5-codex"/m);
-      expect(sanitized).toMatch(/^\[tools\]/m);
-      expect(sanitized).toMatch(/^shell\s*=\s*true/m);
+      const env = {
+        CODEX_HOME: sharedCodexHome,
+        PAPERCLIP_HOME: path.join(root, "paperclip-home"),
+      };
+      await prepareManagedCodexHome(env, async () => {}, "company-1");
+
+      // All three source files must be unchanged
+      expect(
+        await fs.readFile(path.join(sharedCodexHome, "auth.json"), "utf8"),
+      ).toBe(originalAuth);
+      expect(
+        await fs.readFile(path.join(sharedCodexHome, "config.toml"), "utf8"),
+      ).toBe(originalConfigTomlContent);
+      expect(
+        await fs.readFile(
+          path.join(
+            sharedCodexHome,
+            "plugins",
+            "cache",
+            "openai-curated",
+            "gmail",
+            ".app.json",
+          ),
+          "utf8",
+        ),
+      ).toBe(originalGmailAppJson);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("logs a provenance line listing the connectors permitted by inheritedConnectors (or 'none' when default-deny)", async () => {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "paperclip-env-ghsa-log-"),
+    );
+    try {
+      const sharedCodexHome = path.join(root, "shared-codex-home");
+      await seedSharedCodexHome(sharedCodexHome);
+
+      const logs: Array<{ stream: "stdout" | "stderr"; chunk: string }> = [];
+      const onLog = async (stream: "stdout" | "stderr", chunk: string) => {
+        logs.push({ stream, chunk });
+      };
+      const env = {
+        CODEX_HOME: sharedCodexHome,
+        PAPERCLIP_HOME: path.join(root, "paperclip-home"),
+      };
+
+      await prepareManagedCodexHome(env, onLog, "company-1");
+
+      // Provenance line should name the allowlists (default-deny path renders
+      // "allowRead=[] allowWrite=[]" or similar)
+      const allLogChunks = logs.map((log) => log.chunk).join("");
+      expect(allLogChunks).toMatch(/inherited connectors/i);
+      // Either explicit empty arrays or the word "none" is acceptable per the
+      // sibling's agent_prompt.
+      expect(allLogChunks).toMatch(/allowRead|allowWrite|none/);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
