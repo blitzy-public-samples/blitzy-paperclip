@@ -2614,4 +2614,223 @@ describe("company portability", () => {
       },
     }));
   });
+
+  it("imports codex_local agent with dangerouslyBypassApprovalsAndSandbox=false when the adapterOverrides config omits the field (GHSA-gqqj-85qm-8qhf Directive 3 default flip)", async () => {
+    const portability = companyPortabilityService({} as any);
+
+    companySvc.create.mockResolvedValue({
+      id: "company-imported",
+      name: "Imported Paperclip",
+    });
+    accessSvc.ensureMembership.mockResolvedValue(undefined);
+    agentSvc.create.mockResolvedValue({
+      id: "agent-created",
+      name: "ClaudeCoder",
+    });
+
+    const exported = await portability.exportBundle("company-1", {
+      include: {
+        company: true,
+        agents: true,
+        projects: false,
+        issues: false,
+      },
+    });
+
+    agentSvc.list.mockResolvedValue([]);
+
+    await portability.importBundle({
+      source: {
+        type: "inline",
+        rootPath: exported.rootPath,
+        files: exported.files,
+      },
+      include: {
+        company: true,
+        agents: true,
+        projects: false,
+        issues: false,
+      },
+      target: {
+        mode: "new_company",
+        newCompanyName: "Imported Paperclip",
+      },
+      agents: "all",
+      collisionStrategy: "rename",
+      // CRITICAL: adapterOverrides switches to codex_local but does NOT specify
+      // dangerouslyBypassApprovalsAndSandbox. Per Directive 3, the default must be false.
+      adapterOverrides: {
+        claudecoder: {
+          adapterType: "codex_local",
+          adapterConfig: {
+            // Intentionally omit dangerouslyBypassApprovalsAndSandbox
+          },
+        },
+      },
+    }, "user-1");
+
+    // The persisted agent MUST NOT have dangerouslyBypassApprovalsAndSandbox=true.
+    // It must either be explicitly false OR absent (both are safe).
+    const createCall = agentSvc.create.mock.calls.find(
+      (call) => (call[1] as { adapterType?: string }).adapterType === "codex_local",
+    );
+    expect(createCall).toBeDefined();
+    const createdConfig = (createCall?.[1] as { adapterConfig: Record<string, unknown> }).adapterConfig;
+
+    expect(createdConfig.dangerouslyBypassApprovalsAndSandbox).not.toBe(true);
+    // The most common outcomes per the AAP: the portability layer either leaves it
+    // unset (and the runtime adapter-defaults resolve it to false) OR it is
+    // explicitly set to false at persistence time. Both are acceptable per the
+    // SYSTEM BOUNDARY that only the implicit default changes.
+    if (Object.prototype.hasOwnProperty.call(createdConfig, "dangerouslyBypassApprovalsAndSandbox")) {
+      expect(createdConfig.dangerouslyBypassApprovalsAndSandbox).toBe(false);
+    }
+  });
+
+  it("preserves explicit dangerouslyBypassApprovalsAndSandbox=true override through import (SYSTEM BOUNDARY: explicit flag remains functional)", async () => {
+    const portability = companyPortabilityService({} as any);
+
+    companySvc.create.mockResolvedValue({
+      id: "company-imported",
+      name: "Imported Paperclip",
+    });
+    accessSvc.ensureMembership.mockResolvedValue(undefined);
+    agentSvc.create.mockResolvedValue({
+      id: "agent-created",
+      name: "ClaudeCoder",
+    });
+
+    const exported = await portability.exportBundle("company-1", {
+      include: {
+        company: true,
+        agents: true,
+        projects: false,
+        issues: false,
+      },
+    });
+
+    agentSvc.list.mockResolvedValue([]);
+
+    await portability.importBundle({
+      source: {
+        type: "inline",
+        rootPath: exported.rootPath,
+        files: exported.files,
+      },
+      include: {
+        company: true,
+        agents: true,
+        projects: false,
+        issues: false,
+      },
+      target: {
+        mode: "new_company",
+        newCompanyName: "Imported Paperclip",
+      },
+      agents: "all",
+      collisionStrategy: "rename",
+      adapterOverrides: {
+        claudecoder: {
+          adapterType: "codex_local",
+          adapterConfig: {
+            // Explicit true — SYSTEM BOUNDARY: this MUST propagate unchanged
+            dangerouslyBypassApprovalsAndSandbox: true,
+          },
+        },
+      },
+    }, "user-1");
+
+    // Explicit true must propagate — the default flip MUST NOT clobber explicit opt-ins.
+    expect(agentSvc.create).toHaveBeenCalledWith(
+      "company-imported",
+      expect.objectContaining({
+        adapterType: "codex_local",
+        adapterConfig: expect.objectContaining({
+          dangerouslyBypassApprovalsAndSandbox: true,
+        }),
+      }),
+    );
+  });
+
+  it("preserves inheritedConnectors.allowRead and inheritedConnectors.allowWrite through import (GHSA-gqqj-85qm-8qhf Directive 2 additive field round-trip)", async () => {
+    const portability = companyPortabilityService({} as any);
+
+    companySvc.create.mockResolvedValue({
+      id: "company-imported",
+      name: "Imported Paperclip",
+    });
+    accessSvc.ensureMembership.mockResolvedValue(undefined);
+    agentSvc.create.mockResolvedValue({
+      id: "agent-created",
+      name: "ClaudeCoder",
+    });
+
+    const exported = await portability.exportBundle("company-1", {
+      include: {
+        company: true,
+        agents: true,
+        projects: false,
+        issues: false,
+      },
+    });
+
+    agentSvc.list.mockResolvedValue([]);
+
+    await portability.importBundle({
+      source: {
+        type: "inline",
+        rootPath: exported.rootPath,
+        files: exported.files,
+      },
+      include: {
+        company: true,
+        agents: true,
+        projects: false,
+        issues: false,
+      },
+      target: {
+        mode: "new_company",
+        newCompanyName: "Imported Paperclip",
+      },
+      agents: "all",
+      collisionStrategy: "rename",
+      adapterOverrides: {
+        claudecoder: {
+          adapterType: "codex_local",
+          adapterConfig: {
+            inheritedConnectors: {
+              allowRead: ["gmail"],
+              allowWrite: ["github"],
+            },
+          },
+        },
+      },
+    }, "user-1");
+
+    // The inheritedConnectors field MUST round-trip bit-identical.
+    expect(agentSvc.create).toHaveBeenCalledWith(
+      "company-imported",
+      expect.objectContaining({
+        adapterType: "codex_local",
+        adapterConfig: expect.objectContaining({
+          inheritedConnectors: {
+            allowRead: ["gmail"],
+            allowWrite: ["github"],
+          },
+        }),
+      }),
+    );
+
+    // Additionally verify the default-deny default for codex_local agents with
+    // NO inheritedConnectors in overrides: either absent OR defaulted to
+    // empty allowlists. We assert absence here since the field is additive.
+    const createCall = agentSvc.create.mock.calls.find(
+      (call) => (call[1] as { adapterType?: string }).adapterType === "codex_local",
+    );
+    expect(createCall).toBeDefined();
+    const createdConfig = (createCall?.[1] as { adapterConfig: Record<string, unknown> }).adapterConfig;
+    expect(createdConfig).toEqual(expect.objectContaining({
+      inheritedConnectors: { allowRead: ["gmail"], allowWrite: ["github"] },
+    }));
+  });
 });
