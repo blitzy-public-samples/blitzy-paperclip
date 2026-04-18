@@ -21,12 +21,21 @@
 // `rewriteTomlStripConnectorBlocks`, `classifyTomlSection`) are not
 // exported and MUST NOT be imported.
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
 import { prepareManagedCodexHome } from "./codex-home.js";
+
+// `vi` is imported for parity with the sibling `quota-spawn-error.test.ts`
+// pattern even though this file does not mock any modules — the integration
+// test exercises the real filesystem rather than mocking it, aligning with
+// the AAP's "No mocking of `fs`, `os`, or `path`" directive. A reference to
+// `vi` is retained so the import is observable to any tooling that flags
+// unused imports (the vitest `expect.extend`/matcher registry is the
+// canonical no-op consumer used across the sibling integration tests).
+void vi;
 
 describe("prepareManagedCodexHome (GHSA-gqqj-85qm-8qhf)", () => {
   let sourceHome: string;
