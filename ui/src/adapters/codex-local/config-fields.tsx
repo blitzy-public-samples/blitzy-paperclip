@@ -86,6 +86,100 @@ export function CodexLocalConfigFields({
             : mark("adapterConfig", "dangerouslyBypassApprovalsAndSandbox", v)
         }
       />
+      <Field
+        label="Inherited connectors (read-only)"
+        hint={
+          help.inheritedConnectorsAllowRead ??
+          "Comma-separated connector names (e.g., gmail, gcal, drive). Default-deny: empty means no inherited connectors are exposed to this agent for read actions."
+        }
+      >
+        <DraftInput
+          value={
+            isCreate
+              ? (values!.inheritedConnectors?.allowRead ?? []).join(", ")
+              : eff(
+                  "adapterConfig",
+                  "inheritedConnectors.allowRead",
+                  (
+                    (config.inheritedConnectors as
+                      | { allowRead?: string[] }
+                      | undefined)?.allowRead ?? []
+                  ).join(", "),
+                )
+          }
+          onCommit={(v) => {
+            const parsed = v
+              .split(",")
+              .map((s) => s.trim())
+              .filter((s) => s.length > 0);
+            if (isCreate) {
+              const current =
+                values!.inheritedConnectors ?? { allowRead: [], allowWrite: [] };
+              set!({
+                inheritedConnectors: { ...current, allowRead: parsed },
+              });
+            } else {
+              const currentConfig =
+                (config.inheritedConnectors as
+                  | { allowRead?: string[]; allowWrite?: string[] }
+                  | undefined) ?? { allowRead: [], allowWrite: [] };
+              mark("adapterConfig", "inheritedConnectors", {
+                ...currentConfig,
+                allowRead: parsed,
+              });
+            }
+          }}
+          className={inputClass}
+          placeholder="gmail, gcal, drive"
+        />
+      </Field>
+      <Field
+        label="Inherited connectors (write)"
+        hint={
+          help.inheritedConnectorsAllowWrite ??
+          "Comma-separated connector names whose WRITE-classified tools (send_*, create_*, update_*, delete_*) may be invoked. DANGEROUS — enables outbound actions on your connected third-party accounts. Independent of read opt-in."
+        }
+      >
+        <DraftInput
+          value={
+            isCreate
+              ? (values!.inheritedConnectors?.allowWrite ?? []).join(", ")
+              : eff(
+                  "adapterConfig",
+                  "inheritedConnectors.allowWrite",
+                  (
+                    (config.inheritedConnectors as
+                      | { allowWrite?: string[] }
+                      | undefined)?.allowWrite ?? []
+                  ).join(", "),
+                )
+          }
+          onCommit={(v) => {
+            const parsed = v
+              .split(",")
+              .map((s) => s.trim())
+              .filter((s) => s.length > 0);
+            if (isCreate) {
+              const current =
+                values!.inheritedConnectors ?? { allowRead: [], allowWrite: [] };
+              set!({
+                inheritedConnectors: { ...current, allowWrite: parsed },
+              });
+            } else {
+              const currentConfig =
+                (config.inheritedConnectors as
+                  | { allowRead?: string[]; allowWrite?: string[] }
+                  | undefined) ?? { allowRead: [], allowWrite: [] };
+              mark("adapterConfig", "inheritedConnectors", {
+                ...currentConfig,
+                allowWrite: parsed,
+              });
+            }
+          }}
+          className={inputClass}
+          placeholder="gmail"
+        />
+      </Field>
       <ToggleField
         label="Enable search"
         hint={help.search}
