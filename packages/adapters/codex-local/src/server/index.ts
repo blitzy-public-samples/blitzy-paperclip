@@ -2,6 +2,13 @@ export { execute, ensureCodexSkillsInjected } from "./execute.js";
 export { listCodexSkills, syncCodexSkills } from "./skills.js";
 export { testEnvironment } from "./test.js";
 export { parseCodexJsonl, isCodexUnknownSessionError } from "./parse.js";
+export { emitConnectorAuditRecord } from "./connector-audit.js";
+export type {
+  ConnectorAuditDb,
+  LogActivityFn,
+  ConnectorAuditParams,
+} from "./connector-audit.js";
+export { prepareManagedCodexHome } from "./codex-home.js";
 export {
   getQuotaWindows,
   readCodexAuthInfo,
