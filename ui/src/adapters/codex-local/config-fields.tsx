@@ -40,6 +40,28 @@ export function CodexLocalConfigFields({
   const fastModeSupported = isCodexLocalFastModeSupported(currentModel);
   const supportedModelsLabel = CODEX_LOCAL_FAST_MODE_SUPPORTED_MODELS.join(", ");
 
+  // Edit-mode overlay-aware read of `inheritedConnectors`. The overlay stores
+  // `inheritedConnectors` under a FLAT key (the whole object). We must therefore
+  // look it up via `eff("adapterConfig", "inheritedConnectors", ...)` — never via
+  // a dotted path like `"inheritedConnectors.allowRead"`, which `eff`'s `in`-operator
+  // lookup can never resolve (resulting in silent fallback to the ORIGINAL agent
+  // config and, on commit, clobbering prior-field edits via the spread).
+  // Mirrors the canonical pattern in `openclaw-gateway/config-fields.tsx:67-91`.
+  const configuredInherited =
+    config.inheritedConnectors &&
+    typeof config.inheritedConnectors === "object" &&
+    !Array.isArray(config.inheritedConnectors)
+      ? (config.inheritedConnectors as {
+          allowRead?: string[];
+          allowWrite?: string[];
+        })
+      : { allowRead: [] as string[], allowWrite: [] as string[] };
+  const effectiveInherited = !isCreate
+    ? ((eff("adapterConfig", "inheritedConnectors", configuredInherited) as
+        | { allowRead?: string[]; allowWrite?: string[] }
+        | undefined) ?? { allowRead: [], allowWrite: [] })
+    : configuredInherited;
+
   return (
     <>
       {!hideInstructionsFile && (
@@ -97,15 +119,7 @@ export function CodexLocalConfigFields({
           value={
             isCreate
               ? (values!.inheritedConnectors?.allowRead ?? []).join(", ")
-              : eff(
-                  "adapterConfig",
-                  "inheritedConnectors.allowRead",
-                  (
-                    (config.inheritedConnectors as
-                      | { allowRead?: string[] }
-                      | undefined)?.allowRead ?? []
-                  ).join(", "),
-                )
+              : (effectiveInherited.allowRead ?? []).join(", ")
           }
           onCommit={(v) => {
             const parsed = v
@@ -119,12 +133,12 @@ export function CodexLocalConfigFields({
                 inheritedConnectors: { ...current, allowRead: parsed },
               });
             } else {
-              const currentConfig =
-                (config.inheritedConnectors as
-                  | { allowRead?: string[]; allowWrite?: string[] }
-                  | undefined) ?? { allowRead: [], allowWrite: [] };
+              // Spread the EFFECTIVE (overlay-aware) value so that a prior edit
+              // to the sibling `allowWrite` field in the same edit session is
+              // preserved. Spreading the raw `config.inheritedConnectors` here
+              // would read the ORIGINAL agent config and clobber the sibling.
               mark("adapterConfig", "inheritedConnectors", {
-                ...currentConfig,
+                ...effectiveInherited,
                 allowRead: parsed,
               });
             }
@@ -144,15 +158,7 @@ export function CodexLocalConfigFields({
           value={
             isCreate
               ? (values!.inheritedConnectors?.allowWrite ?? []).join(", ")
-              : eff(
-                  "adapterConfig",
-                  "inheritedConnectors.allowWrite",
-                  (
-                    (config.inheritedConnectors as
-                      | { allowWrite?: string[] }
-                      | undefined)?.allowWrite ?? []
-                  ).join(", "),
-                )
+              : (effectiveInherited.allowWrite ?? []).join(", ")
           }
           onCommit={(v) => {
             const parsed = v
@@ -166,12 +172,12 @@ export function CodexLocalConfigFields({
                 inheritedConnectors: { ...current, allowWrite: parsed },
               });
             } else {
-              const currentConfig =
-                (config.inheritedConnectors as
-                  | { allowRead?: string[]; allowWrite?: string[] }
-                  | undefined) ?? { allowRead: [], allowWrite: [] };
+              // Spread the EFFECTIVE (overlay-aware) value so that a prior edit
+              // to the sibling `allowRead` field in the same edit session is
+              // preserved. See the companion comment on the `allowRead` commit
+              // handler above.
               mark("adapterConfig", "inheritedConnectors", {
-                ...currentConfig,
+                ...effectiveInherited,
                 allowWrite: parsed,
               });
             }
