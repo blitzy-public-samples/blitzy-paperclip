@@ -32,6 +32,7 @@ export type {
   StdoutLineParser,
   CLIAdapterModule,
   CreateConfigValues,
+  InheritedConnectorsConfig,
 } from "./types.js";
 export type {
   SessionCompactionPolicy,
