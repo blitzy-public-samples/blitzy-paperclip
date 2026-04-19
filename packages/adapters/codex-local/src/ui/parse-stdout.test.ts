@@ -80,4 +80,54 @@ describe("parseCodexStdoutLine", () => {
       isError: true,
     }]);
   });
+
+  it("parses item.started for mcp__codex_apps__gmail_get_profile as kind: tool_call (GHSA-gqqj-85qm-8qhf regression)", () => {
+    const entries = parseCodexStdoutLine(
+      JSON.stringify({
+        type: "item.started",
+        item: {
+          id: "tool-gmail-1",
+          type: "tool_use",
+          name: "mcp__codex_apps__gmail_get_profile",
+          input: {},
+        },
+      }),
+      "2026-04-08T12:00:00.000Z",
+    );
+
+    expect(entries).toEqual([
+      {
+        kind: "tool_call",
+        ts: "2026-04-08T12:00:00.000Z",
+        name: "mcp__codex_apps__gmail_get_profile",
+        toolUseId: "tool-gmail-1",
+        input: {},
+      },
+    ]);
+  });
+
+  it("parses item.completed for mcp__codex_apps__gmail_send_email preserving the existing tool_result shape (GHSA-gqqj-85qm-8qhf regression)", () => {
+    const entries = parseCodexStdoutLine(
+      JSON.stringify({
+        type: "item.completed",
+        item: {
+          id: "tool-gmail-send-1",
+          type: "tool_use",
+          name: "mcp__codex_apps__gmail_send_email",
+          status: "completed",
+        },
+      }),
+      "2026-04-08T12:00:05.000Z",
+    );
+
+    expect(entries).toEqual([
+      {
+        kind: "tool_result",
+        ts: "2026-04-08T12:00:05.000Z",
+        toolUseId: "tool-gmail-send-1",
+        content: "mcp__codex_apps__gmail_send_email completed",
+        isError: false,
+      },
+    ]);
+  });
 });

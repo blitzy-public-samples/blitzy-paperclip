@@ -10,7 +10,7 @@ import { ChoosePathButton } from "../../components/PathInstructionsModal";
 import { LocalWorkspaceRuntimeFields } from "../local-workspace-runtime-fields";
 
 const inputClass =
-  "w-full rounded-md border border-border px-2.5 py-1.5 bg-transparent outline-none text-sm font-mono placeholder:text-muted-foreground/40";
+  "w-full rounded-md border border-input px-2.5 py-1.5 bg-transparent text-sm font-mono placeholder:text-muted-foreground/70 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2";
 
 const instructionsFileHint =
   "Absolute path to a markdown file (e.g. AGENTS.md) that defines this agent's behavior. Injected into the system prompt at runtime.";
@@ -114,11 +114,11 @@ export function ClaudeLocalAdvancedFields({
       />
       <Field label="Max turns per run" hint={help.maxTurnsPerRun}>
         {isCreate ? (
-          <input
-            type="number"
-            className={inputClass}
+          <DraftNumberInput
             value={values!.maxTurnsPerRun}
-            onChange={(e) => set!({ maxTurnsPerRun: Number(e.target.value) })}
+            onCommit={(v) => set!({ maxTurnsPerRun: v })}
+            immediate
+            className={inputClass}
           />
         ) : (
           <DraftNumberInput

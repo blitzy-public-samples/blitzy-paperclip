@@ -32,7 +32,12 @@ export const ToggleSwitch = React.forwardRef<
           "disabled:cursor-not-allowed disabled:opacity-50",
           // Track: larger on mobile (<640px), standard on desktop
           isLg ? "h-7 w-12 sm:h-6 sm:w-11" : "h-6 w-10 sm:h-5 sm:w-9",
-          checked ? "bg-green-600" : "bg-muted",
+          // OFF state uses bg-input (raised to oklch(0.55) in index.css) rather
+          // than bg-muted so the idle track reaches >= 3:1 against both light
+          // and dark backgrounds per WCAG 2.1 AA 1.4.11 Non-text Contrast.
+          // Previously bg-muted (oklch 0.97 light / 0.269 dark) measured
+          // 1.31:1 against the near-black dark surface and failed audit.
+          checked ? "bg-green-600" : "bg-input",
           className,
         )}
         onClick={() => onCheckedChange(!checked)}

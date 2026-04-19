@@ -1,12 +1,83 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
+import type {
+  AdapterExecutionContext,
+  InheritedConnectorsConfig,
+} from "@paperclipai/adapter-utils";
 
 const TRUTHY_ENV_RE = /^(1|true|yes|on)$/i;
 const COPIED_SHARED_FILES = ["config.json", "config.toml", "instructions.md"] as const;
 const SYMLINKED_SHARED_FILES = ["auth.json"] as const;
 const DEFAULT_PAPERCLIP_INSTANCE_ID = "default";
+
+// GHSA-gqqj-85qm-8qhf — defense-in-depth at the manifest-sanitization boundary.
+//
+// Connector names supplied via `inheritedConnectors.allowRead` / `allowWrite`
+// flow into the managed `config.toml` as `[apps.<name>]` section headers and
+// into stdout provenance logs. Although the authoritative runtime gate in
+// `execute.ts` already fails closed for any invocation whose connector name is
+// not in the opt-in set, unvalidated names containing TOML metadata characters
+// (`]`, `[`, `"`, newline, `\0`, whitespace) could produce malformed or
+// attacker-controlled TOML output and could corrupt the provenance log. This
+// validator rejects such names at the `prepareManagedCodexHome` boundary with
+// a warning log, preserving the "default-deny" posture (rejected names simply
+// do not appear in the sanitized manifest, so any invocation against them is
+// denied at runtime).
+//
+// The allowed character set covers the documented connector naming conventions
+// for both OpenAI-curated connectors (e.g., `gmail`, `gcal`, `drive`, `github`,
+// `linear`) and paperclip-native connectors (e.g., `acme.linear`). Lengths are
+// bounded to protect against pathological inputs.
+const VALID_CONNECTOR_NAME_RE = /^[a-zA-Z0-9._-]+$/;
+const MAX_CONNECTOR_NAME_LENGTH = 128;
+
+/**
+ * Filter a list of connector names supplied via `inheritedConnectors.allowRead`
+ * or `inheritedConnectors.allowWrite`, keeping only names that match the
+ * `VALID_CONNECTOR_NAME_RE` allowlist and are within the length bound. Invalid
+ * names (including those containing TOML metadata characters that could inject
+ * arbitrary TOML sections, or newlines that could corrupt provenance logs) are
+ * dropped and a warning is emitted via `onLog` (without echoing the raw invalid
+ * value, to avoid log-injection propagation).
+ *
+ * Returns a new array; does not mutate the input.
+ */
+function filterValidConnectorNames(
+  names: unknown,
+  kind: "allowRead" | "allowWrite",
+  onLog: AdapterExecutionContext["onLog"],
+): string[] {
+  if (!Array.isArray(names)) return [];
+  const valid: string[] = [];
+  let rejectedCount = 0;
+  for (const candidate of names) {
+    if (typeof candidate !== "string") {
+      rejectedCount += 1;
+      continue;
+    }
+    const trimmed = candidate.trim();
+    if (trimmed.length === 0) continue;
+    if (trimmed.length > MAX_CONNECTOR_NAME_LENGTH) {
+      rejectedCount += 1;
+      continue;
+    }
+    if (!VALID_CONNECTOR_NAME_RE.test(trimmed)) {
+      rejectedCount += 1;
+      continue;
+    }
+    valid.push(trimmed);
+  }
+  if (rejectedCount > 0) {
+    // Emit count-only warning; do not echo raw invalid values into the log
+    // stream (they may themselves contain log-corruption characters).
+    void onLog(
+      "stdout",
+      `[paperclip] rejected ${rejectedCount} invalid ${kind} connector name(s) (must match [a-zA-Z0-9._-]+ and be <= ${MAX_CONNECTOR_NAME_LENGTH} chars)\n`,
+    );
+  }
+  return valid;
+}
 
 function nonEmpty(value: string | undefined): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
@@ -71,10 +142,207 @@ async function ensureCopiedFile(target: string, source: string): Promise<void> {
   await fs.copyFile(source, target);
 }
 
+// ---------------------------------------------------------------------------
+// GHSA-gqqj-85qm-8qhf — managed config.toml sanitization (default-deny for
+// OpenAI-curated connector inheritance).
+// ---------------------------------------------------------------------------
+
+/**
+ * Sanitize the managed Codex home's copied `config.toml` to remove OpenAI-curated
+ * connector inheritance and re-enable only the connectors explicitly opted in
+ * via `inheritedConnectors.allowRead` / `inheritedConnectors.allowWrite`.
+ *
+ * Strips (or disables) TOML sections matching:
+ *   - `[plugins."<name>@openai-curated"]`
+ *   - `[apps.<name>]`
+ *   - `[apps.<name>.tools."<tool>"]`
+ *   - `[mcp_servers.<name>]` where `<name>` is a well-known OpenAI connector host
+ *     (`codex_apps`, `openai`, `chatgpt`).
+ *
+ * Re-enables connectors named in `allowRead ∪ allowWrite` by emitting a minimum
+ * `[apps.<name>]\nenabled = true\n` block. All non-connector blocks (e.g.,
+ * `[tools]`, `[profile.*]`, top-level `model`, `approval_policy`) are preserved
+ * bit-identical.
+ *
+ * SYSTEM BOUNDARY: Operates only on `targetHome` (the Paperclip-managed copy).
+ * Never touches `~/.codex/plugins/cache/openai-curated/` or any path inside the
+ * shared source Codex home. `prepareManagedCodexHome` short-circuits when
+ * `sourceHome === targetHome`, so this function is only reachable for a managed
+ * copy that Paperclip owns.
+ *
+ * Defense-in-depth: this is defense layer 1 (manifest-level). The runtime gate
+ * in `execute.ts` on the Codex JSONL stream is defense layer 2 (authoritative).
+ */
+async function sanitizeCopiedCodexConfig(
+  targetHome: string,
+  inheritedConnectors: InheritedConnectorsConfig | undefined,
+): Promise<{ allowedConnectors: string[] }> {
+  const configPath = path.join(targetHome, "config.toml");
+  if (!(await pathExists(configPath))) {
+    return { allowedConnectors: [] };
+  }
+  const raw = await fs.readFile(configPath, "utf8");
+  const allowSet = new Set<string>([
+    ...(inheritedConnectors?.allowRead ?? []).filter(
+      (s): s is string => typeof s === "string" && s.length > 0,
+    ),
+    ...(inheritedConnectors?.allowWrite ?? []).filter(
+      (s): s is string => typeof s === "string" && s.length > 0,
+    ),
+  ]);
+  const { sanitized, allowedEnabled } = rewriteTomlStripConnectorBlocks(raw, allowSet);
+  if (sanitized !== raw) {
+    await fs.writeFile(configPath, sanitized, "utf8");
+  }
+  return { allowedConnectors: Array.from(allowedEnabled) };
+}
+
+/**
+ * Pure string-rewrite helper that strips OpenAI-curated connector blocks and
+ * re-enables allowlisted `[apps.<name>]` blocks. Uses a minimal inline line-based
+ * approach to avoid adding a TOML parser dependency.
+ *
+ * Parsing model:
+ *   - Iterate the file line-by-line.
+ *   - A "section header" matches `/^\s*\[([^\]]+)\]\s*$/` — the typical Codex
+ *     header shape (no multi-line tables, no inline-table syntax). Codex's
+ *     connector config never uses those forms.
+ *   - A section runs from its header line through to the next header or EOF.
+ *     "Preamble" lines before the first header are preserved verbatim.
+ *   - For each section, examine the header content (dotted path like
+ *     `plugins."gmail@openai-curated"`, `apps.gmail`,
+ *     `apps.gmail.tools."search_emails"`, `mcp_servers.codex_apps`).
+ *     Decide:
+ *       - STRIP: skip the section entirely.
+ *       - KEEP:  emit the section verbatim.
+ *       - SUBSTITUTE: emit a minimum `[apps.<name>]\nenabled = true\n` block.
+ *   - Track which allowlisted connectors were re-enabled.
+ *
+ * Strip rules (conservative):
+ *   - `[plugins."<name>@openai-curated"]` → STRIP.
+ *   - `[apps.<name>]` or `[apps.<name>.*]` → STRIP, unless it is the exact
+ *     parent `[apps.<name>]` AND `<name>` is in `allowSet`; in that case,
+ *     SUBSTITUTE. Deeper `[apps.<name>.tools."<tool>"]` blocks are stripped
+ *     regardless — the runtime gate decides tool-level authority.
+ *   - `[mcp_servers.<name>]` → STRIP only when `<name>` is a well-known OpenAI
+ *     connector host (`codex_apps`, `openai`, `chatgpt`). Other mcp_servers
+ *     sections (e.g., paperclip-native plugin servers) are KEPT.
+ *   - Everything else → KEEP.
+ *
+ * Finally, for each connector in `allowSet` that did NOT appear as an existing
+ * `[apps.<name>]` section in the source file, APPEND a minimum
+ * `[apps.<name>]\nenabled = true\n` block at the end so Codex can still
+ * discover the re-enabled connector.
+ */
+function rewriteTomlStripConnectorBlocks(
+  raw: string,
+  allowSet: Set<string>,
+): { sanitized: string; allowedEnabled: Set<string> } {
+  const lines = raw.split("\n");
+  const headerRe = /^\s*\[([^\]]+)\]\s*$/;
+  const output: string[] = [];
+  const allowedEnabled = new Set<string>();
+  let i = 0;
+  // Emit preamble (lines before any section header) verbatim.
+  while (i < lines.length && !headerRe.test(lines[i])) {
+    output.push(lines[i]);
+    i++;
+  }
+  while (i < lines.length) {
+    const headerMatch = headerRe.exec(lines[i]);
+    if (!headerMatch) {
+      // Shouldn't happen given the loop invariant, but be defensive.
+      output.push(lines[i]);
+      i++;
+      continue;
+    }
+    const headerName = headerMatch[1].trim();
+    // Collect this section's body: from the header line until the next header or EOF.
+    const sectionStart = i;
+    i++;
+    while (i < lines.length && !headerRe.test(lines[i])) {
+      i++;
+    }
+    const sectionEnd = i; // exclusive
+    const sectionLines = lines.slice(sectionStart, sectionEnd);
+
+    const decision = classifyTomlSection(headerName, allowSet);
+    if (decision.action === "keep") {
+      output.push(...sectionLines);
+    } else if (decision.action === "substitute") {
+      // Minimum enabled block for an allowlisted app.
+      output.push(`[apps.${decision.appName}]`);
+      output.push(`enabled = true`);
+      // Preserve a trailing empty line if the original section had one, to
+      // minimize cosmetic churn.
+      if (sectionLines[sectionLines.length - 1] === "") {
+        output.push("");
+      }
+      allowedEnabled.add(decision.appName);
+    }
+    // "strip" → emit nothing for this section.
+  }
+  // Append allowlisted connectors that were not present as `[apps.<name>]` in
+  // the source file (so Codex can discover their manifests once re-enabled).
+  for (const appName of allowSet) {
+    if (!allowedEnabled.has(appName)) {
+      // Ensure a blank line separator before the appended block if not already present.
+      if (output.length > 0 && output[output.length - 1] !== "") {
+        output.push("");
+      }
+      output.push(`[apps.${appName}]`);
+      output.push(`enabled = true`);
+      allowedEnabled.add(appName);
+    }
+  }
+  return { sanitized: output.join("\n"), allowedEnabled };
+}
+
+/**
+ * Classify a TOML section header to decide strip vs. keep vs. substitute.
+ * See {@link rewriteTomlStripConnectorBlocks} for the rule matrix.
+ */
+function classifyTomlSection(
+  headerName: string,
+  allowSet: Set<string>,
+):
+  | { action: "keep" }
+  | { action: "strip" }
+  | { action: "substitute"; appName: string } {
+  // [plugins."<name>@openai-curated"] → STRIP
+  if (/^plugins\."[^"]+@openai-curated"$/.test(headerName)) {
+    return { action: "strip" };
+  }
+  // [apps.<name>] → SUBSTITUTE if allowlisted, else STRIP.
+  // Deeper sub-tables like [apps.<name>.tools."<tool>"] are also stripped —
+  // the runtime gate is authoritative for tool-level decisions.
+  const appsMatch = /^apps\.([^.]+)(?:\..+)?$/.exec(headerName);
+  if (appsMatch) {
+    const appName = appsMatch[1];
+    const isParent = headerName === `apps.${appName}`;
+    if (isParent && allowSet.has(appName)) {
+      return { action: "substitute", appName };
+    }
+    return { action: "strip" };
+  }
+  // [mcp_servers.<name>] → STRIP when name is a well-known OpenAI connector host.
+  const mcpMatch = /^mcp_servers\.([^.]+)(?:\..+)?$/.exec(headerName);
+  if (mcpMatch) {
+    const serverName = mcpMatch[1];
+    if (serverName === "codex_apps" || serverName === "openai" || serverName === "chatgpt") {
+      return { action: "strip" };
+    }
+    return { action: "keep" };
+  }
+  // All other sections (tools, profile.*, model, approval_policy, etc.) → KEEP.
+  return { action: "keep" };
+}
+
 export async function prepareManagedCodexHome(
   env: NodeJS.ProcessEnv,
   onLog: AdapterExecutionContext["onLog"],
   companyId?: string,
+  inheritedConnectors?: InheritedConnectorsConfig,
 ): Promise<string> {
   const targetHome = resolveManagedCodexHomeDir(env, companyId);
 
@@ -82,6 +350,20 @@ export async function prepareManagedCodexHome(
   if (path.resolve(sourceHome) === path.resolve(targetHome)) return targetHome;
 
   await fs.mkdir(targetHome, { recursive: true });
+
+  // GHSA-gqqj-85qm-8qhf — defensively remove any pre-existing `plugins/`
+  // directory under the managed Codex home. The managed home must never carry
+  // inherited connector state; this handles stale content from pre-fix runs.
+  // SYSTEM BOUNDARY: operates only on `targetHome` (managed copy); the shared
+  // `~/.codex/plugins/cache/openai-curated/` tree is read-through only.
+  const pluginsDir = path.join(targetHome, "plugins");
+  if (await pathExists(pluginsDir)) {
+    await onLog(
+      "stdout",
+      `[paperclip] unexpected plugins/ directory under managed Codex home; removing: ${pluginsDir}\n`,
+    );
+    await fs.rm(pluginsDir, { recursive: true, force: true }).catch(() => {});
+  }
 
   for (const name of SYMLINKED_SHARED_FILES) {
     const source = path.join(sourceHome, name);
@@ -95,9 +377,43 @@ export async function prepareManagedCodexHome(
     await ensureCopiedFile(path.join(targetHome, name), source);
   }
 
+  // GHSA-gqqj-85qm-8qhf — boundary validation for user-supplied connector
+  // names. Reject names containing TOML metadata characters or newlines BEFORE
+  // they flow into `config.toml` section headers or the provenance log below.
+  // The authoritative runtime gate in `execute.ts` still fails closed for any
+  // invocation not matching the opt-in set, so rejected names simply do not
+  // appear in the sanitized manifest — preserving the default-deny posture.
+  const sanitizedConnectors: InheritedConnectorsConfig | undefined = inheritedConnectors
+    ? {
+        allowRead: filterValidConnectorNames(inheritedConnectors.allowRead, "allowRead", onLog),
+        allowWrite: filterValidConnectorNames(inheritedConnectors.allowWrite, "allowWrite", onLog),
+      }
+    : undefined;
+
+  // GHSA-gqqj-85qm-8qhf — sanitize the copied `config.toml` to strip
+  // OpenAI-curated connector entries (default-deny). Re-enable only the
+  // connectors explicitly listed in `inheritedConnectors.allowRead` or
+  // `inheritedConnectors.allowWrite`. The managed CODEX_HOME must not present
+  // inherited connector state to the spawned Codex CLI unless the agent
+  // opted in. This runs AFTER the copy loop so the config file exists.
+  await sanitizeCopiedCodexConfig(targetHome, sanitizedConnectors);
+
   await onLog(
     "stdout",
     `[paperclip] Using ${isWorktreeMode(env) ? "worktree-isolated" : "Paperclip-managed"} Codex home "${targetHome}" (seeded from "${sourceHome}").\n`,
   );
+
+  // GHSA-gqqj-85qm-8qhf — companion log line naming the current opt-in state
+  // for observability and forensic replay. Uses the post-validation
+  // `sanitizedConnectors` to prevent log-injection via malicious names.
+  const allowReadList = sanitizedConnectors?.allowRead ?? [];
+  const allowWriteList = sanitizedConnectors?.allowWrite ?? [];
+  await onLog(
+    "stdout",
+    `[paperclip] codex_local inherited connectors: ` +
+      `allowRead=[${allowReadList.length > 0 ? allowReadList.join(",") : "none"}], ` +
+      `allowWrite=[${allowWriteList.length > 0 ? allowWriteList.join(",") : "none"}]\n`,
+  );
+
   return targetHome;
 }

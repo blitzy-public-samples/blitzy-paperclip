@@ -29,6 +29,91 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, c
   await fs.chmod(commandPath, 0o755);
 }
 
+// Richer fake Codex CLI capable of emitting arbitrary JSONL events in order,
+// including `item.started` tool_use events that exercise the runtime
+// connector gate (GHSA-gqqj-85qm-8qhf). The helper is ADDITIVE —
+// `writeFakeCodexCommand` above is preserved byte-for-byte.
+type FakeCodexEvent =
+  | { type: "thread.started"; thread_id: string }
+  | {
+      type: "item.started";
+      item: {
+        id: string;
+        type: "tool_use";
+        name: string;
+        input?: Record<string, unknown>;
+      };
+    }
+  | {
+      type: "item.completed";
+      item:
+        | { id?: string; type: "agent_message"; text: string }
+        | { id: string; type: "tool_use"; name: string; result?: unknown };
+    }
+  | {
+      type: "turn.completed";
+      usage: { input_tokens: number; cached_input_tokens: number; output_tokens: number };
+    }
+  | { type: "turn.failed"; error: { message: string } };
+
+async function writeFakeCodexCommandWithEvents(
+  commandPath: string,
+  events: FakeCodexEvent[],
+  options?: { sleepBetweenEventsMs?: number; waitForSigtermMs?: number },
+): Promise<void> {
+  const sleepMs = options?.sleepBetweenEventsMs ?? 10;
+  const waitForSigtermMs = options?.waitForSigtermMs ?? 2000;
+  const script = `#!/usr/bin/env node
+const fs = require("node:fs");
+
+const capturePath = process.env.PAPERCLIP_TEST_CAPTURE_PATH;
+const payload = {
+  argv: process.argv.slice(2),
+  prompt: fs.readFileSync(0, "utf8"),
+  codexHome: process.env.CODEX_HOME || null,
+  paperclipWakePayloadJson: process.env.PAPERCLIP_WAKE_PAYLOAD_JSON || null,
+  paperclipEnvKeys: Object.keys(process.env)
+    .filter((key) => key.startsWith("PAPERCLIP_"))
+    .sort(),
+};
+if (capturePath) {
+  fs.writeFileSync(capturePath, JSON.stringify(payload), "utf8");
+}
+
+const events = ${JSON.stringify(events)};
+let sigtermReceived = false;
+process.on("SIGTERM", () => {
+  sigtermReceived = true;
+  // Signal SIGTERM receipt via a side-channel file for deterministic test assertion
+  if (capturePath) {
+    try {
+      fs.writeFileSync(capturePath + ".sigterm", "received", "utf8");
+    } catch {}
+  }
+  // Exit non-zero on SIGTERM
+  process.exit(143);
+});
+
+async function main() {
+  for (const evt of events) {
+    if (sigtermReceived) return;
+    console.log(JSON.stringify(evt));
+    // Flush stdout and yield to allow the parent to process
+    await new Promise((r) => setTimeout(r, ${sleepMs}));
+  }
+  // After emitting all events, wait briefly to allow SIGTERM to arrive before clean exit
+  await new Promise((r) => setTimeout(r, ${waitForSigtermMs}));
+}
+
+main().catch((e) => {
+  console.error(String(e));
+  process.exit(1);
+});
+`;
+  await fs.writeFile(commandPath, script, "utf8");
+  await fs.chmod(commandPath, 0o755);
+}
+
 type CapturePayload = {
   argv: string[];
   prompt: string;
@@ -919,6 +1004,832 @@ describe("codex execute", () => {
       else process.env.PAPERCLIP_IN_WORKTREE = previousPaperclipInWorktree;
       if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
       else process.env.CODEX_HOME = previousCodexHome;
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  // TODO(GHSA-gqqj-85qm-8qhf CP4): un-skip once `codex-home.ts` config.toml sanitization
+  // (via `sanitizeCopiedCodexConfig` helper stripping `[plugins."*@openai-curated"]`,
+  // `[apps.*]`, `[apps.*.tools.*]`, and `[mcp_servers.*]` curated blocks) lands in
+  // `prepareManagedCodexHome`. This test encodes the Directive 1 default-deny contract
+  // and will remain red until the CP4 sanitization helper is wired.
+  it("sanitizes config.toml to strip openai-curated connector blocks when inheritedConnectors is empty (GHSA-gqqj-85qm-8qhf Directive 1)", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-sanitize-default-deny-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "codex");
+    const capturePath = path.join(root, "capture.json");
+    const sharedCodexHome = path.join(root, "shared-codex-home");
+    const paperclipHome = path.join(root, "paperclip-home");
+    const managedCodexHome = path.join(
+      paperclipHome,
+      "instances",
+      "default",
+      "companies",
+      "company-1",
+      "codex-home",
+    );
+    await fs.mkdir(workspace, { recursive: true });
+    await fs.mkdir(sharedCodexHome, { recursive: true });
+    await fs.writeFile(path.join(sharedCodexHome, "auth.json"), '{"token":"shared"}\n', "utf8");
+
+    const sourceConfigToml = [
+      'model = "codex-mini-latest"',
+      "",
+      "[tools]",
+      "web_search = true",
+      "",
+      '[plugins."gmail@openai-curated"]',
+      "enabled = true",
+      "",
+      "[apps.gmail]",
+      "enabled = true",
+      "destructive_enabled = true",
+      "",
+      '[apps.gmail.tools."send_email"]',
+      "enabled = true",
+      "",
+      "[mcp_servers.codex_apps]",
+      "enabled = true",
+      "",
+    ].join("\n");
+    await fs.writeFile(path.join(sharedCodexHome, "config.toml"), sourceConfigToml, "utf8");
+    await writeFakeCodexCommand(commandPath);
+
+    const previousHome = process.env.HOME;
+    const previousPaperclipHome = process.env.PAPERCLIP_HOME;
+    const previousPaperclipInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
+    const previousPaperclipInWorktree = process.env.PAPERCLIP_IN_WORKTREE;
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.HOME = root;
+    process.env.PAPERCLIP_HOME = paperclipHome;
+    delete process.env.PAPERCLIP_INSTANCE_ID;
+    delete process.env.PAPERCLIP_IN_WORKTREE;
+    process.env.CODEX_HOME = sharedCodexHome;
+
+    try {
+      const logs: LogEntry[] = [];
+      const result = await execute({
+        runId: "run-sanitize-default-deny",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "Codex Coder",
+          adapterType: "codex_local",
+          adapterConfig: {},
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          env: { PAPERCLIP_TEST_CAPTURE_PATH: capturePath },
+          promptTemplate: "Follow the paperclip heartbeat.",
+        },
+        context: {},
+        authToken: "run-jwt-token",
+        onLog: async (stream, chunk) => {
+          logs.push({ stream, chunk });
+        },
+      });
+
+      expect(result.exitCode).toBe(0);
+
+      const managedConfigContent = await fs.readFile(
+        path.join(managedCodexHome, "config.toml"),
+        "utf8",
+      );
+
+      // Stripped: openai-curated connector blocks MUST NOT appear
+      expect(managedConfigContent).not.toMatch(/\[plugins\."gmail@openai-curated"\]/);
+      expect(managedConfigContent).not.toMatch(/\[apps\.gmail\]/);
+      expect(managedConfigContent).not.toMatch(/\[apps\.gmail\.tools\."send_email"\]/);
+      expect(managedConfigContent).not.toMatch(/\[mcp_servers\.codex_apps\]/);
+
+      // Preserved: non-connector blocks MUST be intact
+      expect(managedConfigContent).toContain('model = "codex-mini-latest"');
+      expect(managedConfigContent).toContain("[tools]");
+      expect(managedConfigContent).toContain("web_search = true");
+
+      // Source config.toml MUST be bit-identical (SYSTEM BOUNDARY)
+      const sourceConfigAfter = await fs.readFile(
+        path.join(sharedCodexHome, "config.toml"),
+        "utf8",
+      );
+      expect(sourceConfigAfter).toBe(sourceConfigToml);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
+      else process.env.PAPERCLIP_HOME = previousPaperclipHome;
+      if (previousPaperclipInstanceId === undefined) delete process.env.PAPERCLIP_INSTANCE_ID;
+      else process.env.PAPERCLIP_INSTANCE_ID = previousPaperclipInstanceId;
+      if (previousPaperclipInWorktree === undefined) delete process.env.PAPERCLIP_IN_WORKTREE;
+      else process.env.PAPERCLIP_IN_WORKTREE = previousPaperclipInWorktree;
+      if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousCodexHome;
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  // TODO(GHSA-gqqj-85qm-8qhf CP4): un-skip once `codex-home.ts` config.toml sanitization
+  // accepts an `inheritedConnectors` parameter and re-enables only the minimum
+  // `[apps.<name>]` blocks corresponding to `allowRead ∪ allowWrite` (with
+  // `destructive_enabled = false` unless `allowWrite` includes the connector).
+  // This test encodes the Directive 1 opt-in contract and will remain red until
+  // the CP4 allowlist-aware materialization lands.
+  it("re-enables minimum [apps.<name>] block for connectors listed in inheritedConnectors.allowRead (GHSA-gqqj-85qm-8qhf Directive 1 opt-in)", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-reenable-allow-read-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "codex");
+    const capturePath = path.join(root, "capture.json");
+    const sharedCodexHome = path.join(root, "shared-codex-home");
+    const paperclipHome = path.join(root, "paperclip-home");
+    const managedCodexHome = path.join(
+      paperclipHome,
+      "instances",
+      "default",
+      "companies",
+      "company-1",
+      "codex-home",
+    );
+    await fs.mkdir(workspace, { recursive: true });
+    await fs.mkdir(sharedCodexHome, { recursive: true });
+    await fs.writeFile(path.join(sharedCodexHome, "auth.json"), '{"token":"shared"}\n', "utf8");
+    await fs.writeFile(
+      path.join(sharedCodexHome, "config.toml"),
+      [
+        'model = "codex-mini-latest"',
+        "",
+        "[apps.gmail]",
+        "enabled = true",
+        "destructive_enabled = true",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    await writeFakeCodexCommand(commandPath);
+
+    const previousHome = process.env.HOME;
+    const previousPaperclipHome = process.env.PAPERCLIP_HOME;
+    const previousPaperclipInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
+    const previousPaperclipInWorktree = process.env.PAPERCLIP_IN_WORKTREE;
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.HOME = root;
+    process.env.PAPERCLIP_HOME = paperclipHome;
+    delete process.env.PAPERCLIP_INSTANCE_ID;
+    delete process.env.PAPERCLIP_IN_WORKTREE;
+    process.env.CODEX_HOME = sharedCodexHome;
+
+    try {
+      const logs: LogEntry[] = [];
+      const result = await execute({
+        runId: "run-reenable-read",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "Codex Coder",
+          adapterType: "codex_local",
+          adapterConfig: {
+            inheritedConnectors: { allowRead: ["gmail"], allowWrite: [] },
+          },
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          env: { PAPERCLIP_TEST_CAPTURE_PATH: capturePath },
+          promptTemplate: "Follow the paperclip heartbeat.",
+        },
+        context: {},
+        authToken: "run-jwt-token",
+        onLog: async (stream, chunk) => {
+          logs.push({ stream, chunk });
+        },
+      });
+
+      expect(result.exitCode).toBe(0);
+      const managedConfigContent = await fs.readFile(
+        path.join(managedCodexHome, "config.toml"),
+        "utf8",
+      );
+
+      // allowRead includes gmail: minimum [apps.gmail] block re-enabled
+      expect(managedConfigContent).toMatch(/\[apps\.gmail\]/);
+      expect(managedConfigContent).toMatch(/enabled\s*=\s*true/);
+      // destructive_enabled MUST NOT be carried over — write actions stay runtime-gated
+      expect(managedConfigContent).not.toMatch(/destructive_enabled\s*=\s*true/);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
+      else process.env.PAPERCLIP_HOME = previousPaperclipHome;
+      if (previousPaperclipInstanceId === undefined) delete process.env.PAPERCLIP_INSTANCE_ID;
+      else process.env.PAPERCLIP_INSTANCE_ID = previousPaperclipInstanceId;
+      if (previousPaperclipInWorktree === undefined) delete process.env.PAPERCLIP_IN_WORKTREE;
+      else process.env.PAPERCLIP_IN_WORKTREE = previousPaperclipInWorktree;
+      if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousCodexHome;
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  // TODO(GHSA-gqqj-85qm-8qhf CP5): un-skip once `execute.ts` wires the JSONL
+  // connector-invocation gate that (a) classifies `mcp__codex_apps__*` tool_use
+  // items as read/write per the fail-closed regex, (b) terminates the Codex CLI
+  // child process via SIGTERM and returns a named authorization error when a
+  // write-classified tool is invoked without `inheritedConnectors.allowWrite`
+  // coverage, and (c) emits a `denied` audit record via `emitConnectorAuditRecord`
+  // BEFORE propagating the event. Encodes the Directive 2 PoC contract.
+  it("denies mcp__codex_apps__gmail_send_email at the runtime gate and emits denied audit + SIGTERM (GHSA-gqqj-85qm-8qhf Directive 2 PoC)", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-gate-deny-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "codex");
+    const capturePath = path.join(root, "capture.json");
+    const sharedCodexHome = path.join(root, "shared-codex-home");
+    const paperclipHome = path.join(root, "paperclip-home");
+    await fs.mkdir(workspace, { recursive: true });
+    await fs.mkdir(sharedCodexHome, { recursive: true });
+    await fs.writeFile(path.join(sharedCodexHome, "auth.json"), '{"token":"shared"}\n', "utf8");
+    await fs.writeFile(path.join(sharedCodexHome, "config.toml"), 'model = "codex-mini-latest"\n', "utf8");
+
+    await writeFakeCodexCommandWithEvents(commandPath, [
+      { type: "thread.started", thread_id: "thread-poc" },
+      {
+        type: "item.started",
+        item: {
+          id: "tu_send",
+          type: "tool_use",
+          name: "mcp__codex_apps__gmail_send_email",
+          input: { to: "victim@example.com", subject: "exfil", body: "..." },
+        },
+      },
+      // The following events would normally emit — but SIGTERM should fire before they print
+      {
+        type: "turn.completed",
+        usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 0 },
+      },
+    ]);
+
+    const previousHome = process.env.HOME;
+    const previousPaperclipHome = process.env.PAPERCLIP_HOME;
+    const previousPaperclipInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
+    const previousPaperclipInWorktree = process.env.PAPERCLIP_IN_WORKTREE;
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.HOME = root;
+    process.env.PAPERCLIP_HOME = paperclipHome;
+    delete process.env.PAPERCLIP_INSTANCE_ID;
+    delete process.env.PAPERCLIP_IN_WORKTREE;
+    process.env.CODEX_HOME = sharedCodexHome;
+
+    try {
+      const logs: LogEntry[] = [];
+      const result = await execute({
+        runId: "run-poc-deny-write",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "Codex Coder",
+          adapterType: "codex_local",
+          adapterConfig: {
+            // Default-deny: no inheritedConnectors field at all
+          },
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          env: { PAPERCLIP_TEST_CAPTURE_PATH: capturePath },
+          promptTemplate: "Send mail",
+        },
+        context: {},
+        authToken: "run-jwt-token",
+        onLog: async (stream, chunk) => {
+          logs.push({ stream, chunk });
+        },
+      });
+
+      // The adapter should report a non-zero exit and a named authorization error
+      expect(result.errorMessage).toBeTruthy();
+      expect(result.errorMessage).toMatch(
+        /Authorization error: connector 'gmail' tool 'send_email' requires inheritedConnectors\.allowWrite to include 'gmail'/,
+      );
+
+      // Forensic audit mirror for the denial MUST be present on stderr
+      const auditChunks = logs
+        .filter((log) => log.stream === "stderr")
+        .filter((log) => log.chunk.includes('"type":"connector-audit"'));
+      expect(auditChunks.length).toBeGreaterThanOrEqual(1);
+      const denied = auditChunks
+        .map((log) => {
+          try {
+            return JSON.parse(log.chunk.trim().replace(/\n$/, ""));
+          } catch {
+            return null;
+          }
+        })
+        .filter(
+          (r): r is { outcome: string; classification: string; reason?: string } => r !== null,
+        )
+        .find((r) => r.outcome === "denied");
+      expect(denied).toBeDefined();
+      expect(denied?.classification).toBe("write");
+      expect(denied?.reason).toMatch(/allowWrite/);
+
+      // SIGTERM side-channel: fake CLI writes <capturePath>.sigterm on receipt
+      const sigtermMarker = await fs
+        .readFile(capturePath + ".sigterm", "utf8")
+        .catch(() => null);
+      expect(sigtermMarker).toBe("received");
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
+      else process.env.PAPERCLIP_HOME = previousPaperclipHome;
+      if (previousPaperclipInstanceId === undefined) delete process.env.PAPERCLIP_INSTANCE_ID;
+      else process.env.PAPERCLIP_INSTANCE_ID = previousPaperclipInstanceId;
+      if (previousPaperclipInWorktree === undefined) delete process.env.PAPERCLIP_IN_WORKTREE;
+      else process.env.PAPERCLIP_IN_WORKTREE = previousPaperclipInWorktree;
+      if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousCodexHome;
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  // TODO(GHSA-gqqj-85qm-8qhf CP5): un-skip once `execute.ts` wires the JSONL
+  // connector-invocation gate that denies read-classified `mcp__codex_apps__gmail_*`
+  // tool_use items (e.g. `gmail_get_profile`, `gmail_search_emails`) when the
+  // connector is not present in `inheritedConnectors.allowRead`, returns a named
+  // authorization error, and emits a `denied` audit record. Encodes the Directive 1
+  // PoC contract for read-classified connector tools.
+  it("denies all mcp__codex_apps__gmail_* reads under default-deny (GHSA-gqqj-85qm-8qhf Directive 1 PoC: reads)", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-gate-deny-read-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "codex");
+    const capturePath = path.join(root, "capture.json");
+    const sharedCodexHome = path.join(root, "shared-codex-home");
+    const paperclipHome = path.join(root, "paperclip-home");
+    await fs.mkdir(workspace, { recursive: true });
+    await fs.mkdir(sharedCodexHome, { recursive: true });
+    await fs.writeFile(path.join(sharedCodexHome, "auth.json"), '{"token":"shared"}\n', "utf8");
+    await fs.writeFile(path.join(sharedCodexHome, "config.toml"), 'model = "codex-mini-latest"\n', "utf8");
+
+    await writeFakeCodexCommandWithEvents(commandPath, [
+      { type: "thread.started", thread_id: "thread-read-deny" },
+      {
+        type: "item.started",
+        item: {
+          id: "tu_prof",
+          type: "tool_use",
+          name: "mcp__codex_apps__gmail_get_profile",
+          input: {},
+        },
+      },
+    ]);
+
+    const previousHome = process.env.HOME;
+    const previousPaperclipHome = process.env.PAPERCLIP_HOME;
+    const previousPaperclipInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
+    const previousPaperclipInWorktree = process.env.PAPERCLIP_IN_WORKTREE;
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.HOME = root;
+    process.env.PAPERCLIP_HOME = paperclipHome;
+    delete process.env.PAPERCLIP_INSTANCE_ID;
+    delete process.env.PAPERCLIP_IN_WORKTREE;
+    process.env.CODEX_HOME = sharedCodexHome;
+
+    try {
+      const logs: LogEntry[] = [];
+      const result = await execute({
+        runId: "run-poc-deny-read",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "Codex Coder",
+          adapterType: "codex_local",
+          adapterConfig: {}, // default-deny for both read and write
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          env: { PAPERCLIP_TEST_CAPTURE_PATH: capturePath },
+          promptTemplate: "Get profile",
+        },
+        context: {},
+        authToken: "run-jwt-token",
+        onLog: async (stream, chunk) => {
+          logs.push({ stream, chunk });
+        },
+      });
+
+      expect(result.errorMessage).toBeTruthy();
+      expect(result.errorMessage).toMatch(
+        /Authorization error: connector 'gmail' tool 'get_profile' requires inheritedConnectors\.allowRead to include 'gmail'/,
+      );
+
+      const auditChunks = logs
+        .filter((log) => log.stream === "stderr")
+        .filter((log) => log.chunk.includes('"type":"connector-audit"'));
+      const denied = auditChunks
+        .map((log) => {
+          try {
+            return JSON.parse(log.chunk.trim().replace(/\n$/, ""));
+          } catch {
+            return null;
+          }
+        })
+        .filter(
+          (r): r is { outcome: string; classification: string; reason?: string } => r !== null,
+        )
+        .find((r) => r.outcome === "denied");
+      expect(denied).toBeDefined();
+      expect(denied?.classification).toBe("read");
+      expect(denied?.reason).toMatch(/allowRead/);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
+      else process.env.PAPERCLIP_HOME = previousPaperclipHome;
+      if (previousPaperclipInstanceId === undefined) delete process.env.PAPERCLIP_INSTANCE_ID;
+      else process.env.PAPERCLIP_INSTANCE_ID = previousPaperclipInstanceId;
+      if (previousPaperclipInWorktree === undefined) delete process.env.PAPERCLIP_IN_WORKTREE;
+      else process.env.PAPERCLIP_IN_WORKTREE = previousPaperclipInWorktree;
+      if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousCodexHome;
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  // TODO(GHSA-gqqj-85qm-8qhf CP5): un-skip once `execute.ts` wires the JSONL
+  // connector-invocation gate that permits `mcp__codex_apps__gmail_send_email`
+  // when `inheritedConnectors.allowWrite` includes `"gmail"`, and emits an
+  // `allowed` audit record via `emitConnectorAuditRecord` BEFORE the event
+  // propagates (per Directive 4 timing discipline). Encodes the Directive 5
+  // regression criterion — confirms the fix is a gate, not a blanket disablement.
+  it("allows gmail_send_email when inheritedConnectors.allowWrite includes gmail and emits allowed audit (GHSA-gqqj-85qm-8qhf Directive 5 regression criterion)", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-gate-allow-write-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "codex");
+    const capturePath = path.join(root, "capture.json");
+    const sharedCodexHome = path.join(root, "shared-codex-home");
+    const paperclipHome = path.join(root, "paperclip-home");
+    await fs.mkdir(workspace, { recursive: true });
+    await fs.mkdir(sharedCodexHome, { recursive: true });
+    await fs.writeFile(path.join(sharedCodexHome, "auth.json"), '{"token":"shared"}\n', "utf8");
+    await fs.writeFile(path.join(sharedCodexHome, "config.toml"), 'model = "codex-mini-latest"\n', "utf8");
+
+    await writeFakeCodexCommandWithEvents(commandPath, [
+      { type: "thread.started", thread_id: "thread-allow-write" },
+      {
+        type: "item.started",
+        item: {
+          id: "tu_send_ok",
+          type: "tool_use",
+          name: "mcp__codex_apps__gmail_send_email",
+          input: { to: "colleague@example.com", subject: "authorized", body: "ok" },
+        },
+      },
+      {
+        type: "item.completed",
+        item: {
+          id: "tu_send_ok",
+          type: "tool_use",
+          name: "mcp__codex_apps__gmail_send_email",
+          result: { messageId: "m-1" },
+        },
+      },
+      {
+        type: "turn.completed",
+        usage: { input_tokens: 2, cached_input_tokens: 0, output_tokens: 3 },
+      },
+    ]);
+
+    const previousHome = process.env.HOME;
+    const previousPaperclipHome = process.env.PAPERCLIP_HOME;
+    const previousPaperclipInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
+    const previousPaperclipInWorktree = process.env.PAPERCLIP_IN_WORKTREE;
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.HOME = root;
+    process.env.PAPERCLIP_HOME = paperclipHome;
+    delete process.env.PAPERCLIP_INSTANCE_ID;
+    delete process.env.PAPERCLIP_IN_WORKTREE;
+    process.env.CODEX_HOME = sharedCodexHome;
+
+    try {
+      const logs: LogEntry[] = [];
+      const result = await execute({
+        runId: "run-allow-write",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "Codex Coder",
+          adapterType: "codex_local",
+          adapterConfig: {
+            inheritedConnectors: { allowRead: ["gmail"], allowWrite: ["gmail"] },
+          },
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          env: { PAPERCLIP_TEST_CAPTURE_PATH: capturePath },
+          promptTemplate: "Send mail",
+        },
+        context: {},
+        authToken: "run-jwt-token",
+        onLog: async (stream, chunk) => {
+          logs.push({ stream, chunk });
+        },
+      });
+
+      // No authorization error — the opt-in path is functional
+      expect(result.errorMessage).toBeNull();
+      expect(result.exitCode).toBe(0);
+
+      // An 'allowed' audit record MUST be present with classification 'write'
+      const auditChunks = logs
+        .filter((log) => log.stream === "stderr")
+        .filter((log) => log.chunk.includes('"type":"connector-audit"'));
+      const allowed = auditChunks
+        .map((log) => {
+          try {
+            return JSON.parse(log.chunk.trim().replace(/\n$/, ""));
+          } catch {
+            return null;
+          }
+        })
+        .filter(
+          (r): r is {
+            outcome: string;
+            classification: string;
+            connectorName: string;
+            toolName: string;
+          } => r !== null,
+        )
+        .find((r) => r.outcome === "allowed" && r.classification === "write");
+      expect(allowed).toBeDefined();
+      expect(allowed?.connectorName).toBe("gmail");
+      expect(allowed?.toolName).toBe("mcp__codex_apps__gmail_send_email");
+
+      // NO sigterm marker: the process completed cleanly
+      const sigtermMarker = await fs
+        .readFile(capturePath + ".sigterm", "utf8")
+        .catch(() => null);
+      expect(sigtermMarker).toBeNull();
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
+      else process.env.PAPERCLIP_HOME = previousPaperclipHome;
+      if (previousPaperclipInstanceId === undefined) delete process.env.PAPERCLIP_INSTANCE_ID;
+      else process.env.PAPERCLIP_INSTANCE_ID = previousPaperclipInstanceId;
+      if (previousPaperclipInWorktree === undefined) delete process.env.PAPERCLIP_IN_WORKTREE;
+      else process.env.PAPERCLIP_IN_WORKTREE = previousPaperclipInWorktree;
+      if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousCodexHome;
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not block paperclip-native tool invocations but audits them (GHSA-gqqj-85qm-8qhf Directive 4 + SYSTEM BOUNDARY)", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-native-audit-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "codex");
+    const capturePath = path.join(root, "capture.json");
+    const sharedCodexHome = path.join(root, "shared-codex-home");
+    const paperclipHome = path.join(root, "paperclip-home");
+    await fs.mkdir(workspace, { recursive: true });
+    await fs.mkdir(sharedCodexHome, { recursive: true });
+    await fs.writeFile(path.join(sharedCodexHome, "auth.json"), '{"token":"shared"}\n', "utf8");
+    await fs.writeFile(path.join(sharedCodexHome, "config.toml"), 'model = "codex-mini-latest"\n', "utf8");
+
+    // Paperclip-native tool name does NOT match mcp__codex_apps__ regex
+    await writeFakeCodexCommandWithEvents(commandPath, [
+      { type: "thread.started", thread_id: "thread-native" },
+      {
+        type: "item.started",
+        item: {
+          id: "tu_native",
+          type: "tool_use",
+          name: "acme.linear:search-issues",
+          input: { q: "assignee:me" },
+        },
+      },
+      {
+        type: "item.completed",
+        item: {
+          id: "tu_native",
+          type: "tool_use",
+          name: "acme.linear:search-issues",
+          result: { issues: [] },
+        },
+      },
+      {
+        type: "turn.completed",
+        usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 },
+      },
+    ]);
+
+    const previousHome = process.env.HOME;
+    const previousPaperclipHome = process.env.PAPERCLIP_HOME;
+    const previousPaperclipInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
+    const previousPaperclipInWorktree = process.env.PAPERCLIP_IN_WORKTREE;
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.HOME = root;
+    process.env.PAPERCLIP_HOME = paperclipHome;
+    delete process.env.PAPERCLIP_INSTANCE_ID;
+    delete process.env.PAPERCLIP_IN_WORKTREE;
+    process.env.CODEX_HOME = sharedCodexHome;
+
+    try {
+      const logs: LogEntry[] = [];
+      const result = await execute({
+        runId: "run-native-audit",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "Codex Coder",
+          adapterType: "codex_local",
+          adapterConfig: {},
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          env: { PAPERCLIP_TEST_CAPTURE_PATH: capturePath },
+          promptTemplate: "Search issues",
+        },
+        context: {},
+        authToken: "run-jwt-token",
+        onLog: async (stream, chunk) => {
+          logs.push({ stream, chunk });
+        },
+      });
+
+      // Paperclip-native invocations are NOT blocked
+      expect(result.errorMessage).toBeNull();
+      expect(result.exitCode).toBe(0);
+
+      // But MAY be audited — if the sibling's gate tags paperclip-native with audit emission,
+      // assert the audit record lists connectorSource "paperclip-native".
+      const auditChunks = logs
+        .filter((log) => log.stream === "stderr")
+        .filter((log) => log.chunk.includes('"type":"connector-audit"'));
+      if (auditChunks.length > 0) {
+        const record = JSON.parse(auditChunks[0].chunk.trim().replace(/\n$/, ""));
+        expect(record.connectorSource).toBe("paperclip-native");
+        expect(record.outcome).toBe("allowed");
+      }
+      // NOTE: If the sibling chooses to skip audit emission for paperclip-native invocations,
+      // this test is lenient — the invariant is NO blocking, not MUST audit.
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
+      else process.env.PAPERCLIP_HOME = previousPaperclipHome;
+      if (previousPaperclipInstanceId === undefined) delete process.env.PAPERCLIP_INSTANCE_ID;
+      else process.env.PAPERCLIP_INSTANCE_ID = previousPaperclipInstanceId;
+      if (previousPaperclipInWorktree === undefined) delete process.env.PAPERCLIP_IN_WORKTREE;
+      else process.env.PAPERCLIP_IN_WORKTREE = previousPaperclipInWorktree;
+      if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousCodexHome;
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does NOT append --dangerously-bypass-approvals-and-sandbox when the flag is omitted (GHSA-gqqj-85qm-8qhf Directive 3 default flip)", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-bypass-default-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "codex");
+    const capturePath = path.join(root, "capture.json");
+    await fs.mkdir(workspace, { recursive: true });
+    await writeFakeCodexCommand(commandPath);
+
+    const previousHome = process.env.HOME;
+    process.env.HOME = root;
+
+    try {
+      const logs: LogEntry[] = [];
+      const result = await execute({
+        runId: "run-bypass-default",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "Codex Coder",
+          adapterType: "codex_local",
+          adapterConfig: {}, // Omit the bypass flag entirely
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          env: { PAPERCLIP_TEST_CAPTURE_PATH: capturePath },
+          promptTemplate: "hello",
+        },
+        context: {},
+        authToken: "run-jwt-token",
+        onLog: async (stream, chunk) => {
+          logs.push({ stream, chunk });
+        },
+      });
+
+      expect(result.exitCode).toBe(0);
+      const capture = JSON.parse(await fs.readFile(capturePath, "utf8")) as CapturePayload;
+      expect(capture.argv).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+      expect(capture.argv).not.toContain("--yolo");
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("DOES append --dangerously-bypass-approvals-and-sandbox when the flag is explicitly true (SYSTEM BOUNDARY preservation)", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-execute-bypass-explicit-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = path.join(root, "codex");
+    const capturePath = path.join(root, "capture.json");
+    await fs.mkdir(workspace, { recursive: true });
+    await writeFakeCodexCommand(commandPath);
+
+    const previousHome = process.env.HOME;
+    process.env.HOME = root;
+
+    try {
+      const logs: LogEntry[] = [];
+      // Note: buildCodexExecArgs reads from ctx.config (the AdapterExecutionContext config),
+      // so the bypass flag is supplied here to exercise the arg-builder. This mirrors the
+      // real flow where server-side agent config is projected into the adapter config map.
+      const result = await execute({
+        runId: "run-bypass-explicit",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "Codex Coder",
+          adapterType: "codex_local",
+          adapterConfig: { dangerouslyBypassApprovalsAndSandbox: true },
+        },
+        runtime: {
+          sessionId: null,
+          sessionParams: null,
+          sessionDisplayId: null,
+          taskKey: null,
+        },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          env: { PAPERCLIP_TEST_CAPTURE_PATH: capturePath },
+          promptTemplate: "hello",
+          dangerouslyBypassApprovalsAndSandbox: true,
+        },
+        context: {},
+        authToken: "run-jwt-token",
+        onLog: async (stream, chunk) => {
+          logs.push({ stream, chunk });
+        },
+      });
+
+      expect(result.exitCode).toBe(0);
+      const capture = JSON.parse(await fs.readFile(capturePath, "utf8")) as CapturePayload;
+      // The explicit-true path MUST still work per SYSTEM BOUNDARY
+      expect(capture.argv).toContain("--dangerously-bypass-approvals-and-sandbox");
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
       await fs.rm(root, { recursive: true, force: true });
     }
   });

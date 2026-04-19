@@ -1,4 +1,4 @@
-import type { CreateConfigValues } from "@paperclipai/adapter-utils";
+import type { CreateConfigValues, InheritedConnectorsConfig } from "@paperclipai/adapter-utils";
 import {
   DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX,
   DEFAULT_CODEX_LOCAL_MODEL,
@@ -90,6 +90,29 @@ export function buildCodexLocalConfig(v: CreateConfigValues): Record<string, unk
     typeof v.dangerouslyBypassSandbox === "boolean"
       ? v.dangerouslyBypassSandbox
       : DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX;
+  // Forward inheritedConnectors opt-in allowlists when explicitly provided by the caller.
+  // Absence is semantically equivalent to { allowRead: [], allowWrite: [] } (default-deny);
+  // we do NOT inject a synthetic value so round-trips are byte-identical for configs
+  // that never opt into connector inheritance (backward compatibility).
+  // GHSA-gqqj-85qm-8qhf remediation.
+  if (v.inheritedConnectors) {
+    const normalized: InheritedConnectorsConfig = {};
+    if (Array.isArray(v.inheritedConnectors.allowRead)) {
+      const filtered = v.inheritedConnectors.allowRead
+        .map((s) => (typeof s === "string" ? s.trim() : ""))
+        .filter((s) => s.length > 0);
+      if (filtered.length > 0) normalized.allowRead = filtered;
+    }
+    if (Array.isArray(v.inheritedConnectors.allowWrite)) {
+      const filtered = v.inheritedConnectors.allowWrite
+        .map((s) => (typeof s === "string" ? s.trim() : ""))
+        .filter((s) => s.length > 0);
+      if (filtered.length > 0) normalized.allowWrite = filtered;
+    }
+    if (normalized.allowRead || normalized.allowWrite) {
+      ac.inheritedConnectors = normalized;
+    }
+  }
   if (v.workspaceStrategyType === "git_worktree") {
     ac.workspaceStrategy = {
       type: "git_worktree",

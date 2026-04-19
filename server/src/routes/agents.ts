@@ -541,12 +541,25 @@ export function agentRoutes(db: Db) {
   ): Record<string, unknown> {
     const next = { ...adapterConfig };
     if (adapterType === "codex_local") {
+      // SECURITY INVARIANT (GHSA-gqqj-85qm-8qhf): `inheritedConnectors` (the
+      // per-agent opt-in allowlist for inherited OpenAI-curated connectors) is
+      // not a field we synthesize a default for — absence is semantically
+      // equivalent to `{ allowRead: [], allowWrite: [] }` (default-deny). It
+      // flows through this helper via the top-of-function spread `{ ...adapterConfig }`
+      // on line 542 so no explicit pass-through code is needed here.
       if (!asNonEmptyString(next.model)) {
         next.model = DEFAULT_CODEX_LOCAL_MODEL;
       }
       const hasBypassFlag =
         typeof next.dangerouslyBypassApprovalsAndSandbox === "boolean" ||
         typeof next.dangerouslyBypassSandbox === "boolean";
+      // SECURITY INVARIANT (GHSA-gqqj-85qm-8qhf):
+      // When neither `dangerouslyBypassApprovalsAndSandbox` nor the legacy
+      // `dangerouslyBypassSandbox` is provided by the caller, this block applies
+      // the safe default from `@paperclipai/adapter-codex-local`, which is `false`
+      // (flipped from `true` as part of the remediation). Callers who explicitly
+      // opt in to bypass behavior by passing `true` continue to be honored; only
+      // the implicit default changed. Do NOT remove or short-circuit this guard.
       if (!hasBypassFlag) {
         next.dangerouslyBypassApprovalsAndSandbox = DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX;
       }

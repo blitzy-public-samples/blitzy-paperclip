@@ -60,6 +60,146 @@ describe("parseCodexJsonl", () => {
       errorMessage: null,
     });
   });
+
+  it("preserves existing summary extraction when mcp__codex_apps__* item.completed events are present", () => {
+    const stdout = [
+      JSON.stringify({ type: "thread.started", thread_id: "thread_gmail_1" }),
+      JSON.stringify({
+        type: "item.started",
+        item: {
+          type: "tool_use",
+          id: "call_1",
+          name: "mcp__codex_apps__gmail_get_profile",
+          input: {},
+        },
+      }),
+      JSON.stringify({
+        type: "item.completed",
+        item: {
+          type: "tool_use",
+          id: "call_1",
+          name: "mcp__codex_apps__gmail_get_profile",
+          input: {},
+          output: { email: "user@example.com" },
+        },
+      }),
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text: "Looked up the profile." },
+      }),
+      JSON.stringify({
+        type: "turn.completed",
+        usage: { input_tokens: 5, cached_input_tokens: 1, output_tokens: 3 },
+      }),
+    ].join("\n");
+
+    expect(parseCodexJsonl(stdout)).toEqual({
+      sessionId: "thread_gmail_1",
+      summary: "Looked up the profile.",
+      usage: {
+        inputTokens: 5,
+        cachedInputTokens: 1,
+        outputTokens: 3,
+      },
+      errorMessage: null,
+    });
+  });
+
+  it("tolerates item.started events for mcp__codex_apps__gmail_search_emails tool_use items without altering the returned shape", () => {
+    const stdout = [
+      JSON.stringify({ type: "thread.started", thread_id: "thread_gmail_2" }),
+      JSON.stringify({
+        type: "item.started",
+        item: {
+          type: "tool_use",
+          id: "call_2",
+          name: "mcp__codex_apps__gmail_search_emails",
+          input: { query: "invoice" },
+        },
+      }),
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text: "Searched emails." },
+      }),
+      JSON.stringify({
+        type: "turn.completed",
+        usage: { input_tokens: 7, cached_input_tokens: 0, output_tokens: 2 },
+      }),
+    ].join("\n");
+
+    expect(parseCodexJsonl(stdout)).toEqual({
+      sessionId: "thread_gmail_2",
+      summary: "Searched emails.",
+      usage: {
+        inputTokens: 7,
+        cachedInputTokens: 0,
+        outputTokens: 2,
+      },
+      errorMessage: null,
+    });
+  });
+
+  it("tolerates item.started events for mcp__codex_apps__gmail_send_email tool_use items without altering the returned shape", () => {
+    const stdout = [
+      JSON.stringify({ type: "thread.started", thread_id: "thread_gmail_3" }),
+      JSON.stringify({
+        type: "item.started",
+        item: {
+          type: "tool_use",
+          id: "call_3",
+          name: "mcp__codex_apps__gmail_send_email",
+          input: { to: "test@example.com", subject: "Test", body: "Hi" },
+        },
+      }),
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text: "Drafted an email." },
+      }),
+      JSON.stringify({
+        type: "turn.completed",
+        usage: { input_tokens: 9, cached_input_tokens: 0, output_tokens: 4 },
+      }),
+    ].join("\n");
+
+    expect(parseCodexJsonl(stdout)).toEqual({
+      sessionId: "thread_gmail_3",
+      summary: "Drafted an email.",
+      usage: {
+        inputTokens: 9,
+        cachedInputTokens: 0,
+        outputTokens: 4,
+      },
+      errorMessage: null,
+    });
+  });
+
+  it("handles item.started events with missing item fields gracefully (additive-only parser robustness)", () => {
+    const stdout = [
+      JSON.stringify({ type: "thread.started", thread_id: "thread_robust" }),
+      JSON.stringify({ type: "item.started" }),
+      JSON.stringify({ type: "item.started", item: {} }),
+      JSON.stringify({ type: "item.started", item: { type: "tool_use" } }),
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text: "Done." },
+      }),
+      JSON.stringify({
+        type: "turn.completed",
+        usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 },
+      }),
+    ].join("\n");
+
+    expect(parseCodexJsonl(stdout)).toEqual({
+      sessionId: "thread_robust",
+      summary: "Done.",
+      usage: {
+        inputTokens: 1,
+        cachedInputTokens: 0,
+        outputTokens: 1,
+      },
+      errorMessage: null,
+    });
+  });
 });
 
 describe("isCodexUnknownSessionError", () => {

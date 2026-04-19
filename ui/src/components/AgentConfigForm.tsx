@@ -111,9 +111,24 @@ function isOverlayDirty(o: AgentConfigOverlay): boolean {
   );
 }
 
-/* ---- Shared input class ---- */
+/* ---- Shared input class ----
+ * WCAG 2.1 AA compliant input styling shared across this form.
+ * Parallels the pattern in `agent-config-primitives.tsx` and
+ * `ui/src/adapters/codex-local/config-fields.tsx`:
+ * - `border-input` references the CSS token `--input` (now oklch(0.55)) which
+ *   exceeds 3:1 contrast against the background (satisfies 1.4.11 non-text
+ *   contrast for UI component boundaries).
+ * - `placeholder:text-muted-foreground/70` raises placeholder opacity from the
+ *   previous /40 so placeholder text clears the 4.5:1 threshold (satisfies
+ *   1.4.3 minimum contrast for normal-size text).
+ * - `focus-visible:outline ... focus-visible:outline-ring` provides a
+ *   keyboard-visible focus indicator in place of the previously hidden
+ *   outline (satisfies 2.4.7 focus visible and 1.4.11 non-text contrast for
+ *   focus indicators; the `--ring` token is oklch(0.85) in dark mode and
+ *   oklch(0.40) in light mode, both exceeding 3:1).
+ */
 const inputClass =
-  "w-full rounded-md border border-border px-2.5 py-1.5 bg-transparent outline-none text-sm font-mono placeholder:text-muted-foreground/40";
+  "w-full rounded-md border border-input px-2.5 py-1.5 bg-transparent text-sm font-mono placeholder:text-muted-foreground/70 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2";
 
 function parseCommaArgs(value: string): string[] {
   return value
@@ -208,6 +223,21 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
   const [overlay, setOverlay] = useState<AgentConfigOverlay>(emptyOverlay);
   const agentRef = useRef<Agent | null>(null);
 
+  // ---- Double-submit guard (QA Finding 12) ----
+  // `isSubmittingRef` is a synchronous latch: checked before invoking
+  // `props.onSave` so a second rapid click (including sub-millisecond
+  // double-clicks or parallel Playwright clicks that arrive before React
+  // re-renders) is dropped immediately. `isSubmitting` is the React state
+  // driving the `disabled` attribute on the Save button so users see a
+  // "Saving..." affordance during in-flight saves. The latch is released when
+  // the parent signals completion via `props.isSaving` transitioning back to
+  // `false`, or after a 3-second safety timeout for the defensive case where
+  // the parent never signals completion (see `useEffect` below).
+  const isSubmittingRef = useRef(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const previousIsSavingRef = useRef(false);
+  const submitTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // Clear overlay when agent data refreshes (after save)
   useEffect(() => {
     if (!isCreate) {
@@ -242,8 +272,55 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
 
   const handleSave = useCallback(() => {
     if (isCreate || !isDirty) return;
+    // Synchronous latch (QA Finding 12): drop rapid duplicate invocations
+    // before they ever reach `props.onSave`. React state updates are async,
+    // so relying solely on `isSubmitting` state would allow a second click
+    // dispatched in the same tick to slip through. The ref is checked and
+    // mutated synchronously, which closes that window.
+    if (isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
+    setIsSubmitting(true);
+    // Safety timeout: if the parent never signals completion (e.g., no
+    // `isSaving` prop is wired), release the latch after 3 seconds so the
+    // user is not permanently locked out of the Save button.
+    if (submitTimeoutRef.current !== null) {
+      clearTimeout(submitTimeoutRef.current);
+    }
+    submitTimeoutRef.current = setTimeout(() => {
+      isSubmittingRef.current = false;
+      setIsSubmitting(false);
+      submitTimeoutRef.current = null;
+    }, 3000);
     props.onSave(buildAgentUpdatePatch(props.agent, overlay));
   }, [isCreate, isDirty, overlay, props]);
+
+  // Release the submit latch when the parent signals completion by
+  // transitioning `props.isSaving` from `true` back to `false`. Also clear
+  // any pending safety timeout to avoid a late spurious release.
+  useEffect(() => {
+    if (isCreate) return;
+    const current = props.isSaving === true;
+    const previous = previousIsSavingRef.current;
+    if (previous && !current) {
+      isSubmittingRef.current = false;
+      setIsSubmitting(false);
+      if (submitTimeoutRef.current !== null) {
+        clearTimeout(submitTimeoutRef.current);
+        submitTimeoutRef.current = null;
+      }
+    }
+    previousIsSavingRef.current = current;
+  }, [isCreate, !isCreate ? props.isSaving : undefined]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Clear the pending safety timeout on unmount to avoid leaked timers.
+  useEffect(() => {
+    return () => {
+      if (submitTimeoutRef.current !== null) {
+        clearTimeout(submitTimeoutRef.current);
+        submitTimeoutRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!isCreate) {
@@ -427,9 +504,10 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
             <Button
               size="sm"
               onClick={handleSave}
-              disabled={!isCreate && props.isSaving}
+              disabled={(!isCreate && props.isSaving === true) || isSubmitting}
+              aria-busy={((!isCreate && props.isSaving === true) || isSubmitting) ? true : undefined}
             >
-              {!isCreate && props.isSaving ? "Saving..." : "Save"}
+              {(!isCreate && props.isSaving === true) || isSubmitting ? "Saving..." : "Save"}
             </Button>
           </div>
         </div>
@@ -604,7 +682,15 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
           {/* Working directory */}
           {showLegacyWorkingDirectoryField && (
             <Field label="Working directory (deprecated)" hint={help.cwd}>
-              <div className="flex items-center gap-2 rounded-md border border-border px-2.5 py-1.5">
+              {/* QA Finding 6 + 7 (WCAG 2.4.7 focus visible, 1.4.11 non-text contrast):
+               * wrapper uses `border-input` (oklch(0.55) token, ≥3:1 non-text contrast)
+               * and `focus-within:outline*` so the composite control (icon +
+               * DraftInput + ChoosePathButton) presents a single visible focus
+               * indicator when the inner input receives keyboard focus. The
+               * DraftInput itself keeps `outline-none` and relies on the wrapper
+               * for focus presentation; its placeholder opacity is raised to
+               * /70 to satisfy 1.4.3 minimum contrast. */}
+              <div className="flex items-center gap-2 rounded-md border border-input px-2.5 py-1.5 focus-within:outline focus-within:outline-2 focus-within:outline-ring focus-within:outline-offset-2">
                 <FolderOpen className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
                 <DraftInput
                   value={
@@ -618,7 +704,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                       : mark("adapterConfig", "cwd", v || undefined)
                   }
                   immediate
-                  className="w-full bg-transparent outline-none text-sm font-mono placeholder:text-muted-foreground/40"
+                  className="w-full bg-transparent outline-none text-sm font-mono placeholder:text-muted-foreground/70"
                   placeholder="/path/to/project"
                 />
                 <ChoosePathButton />
@@ -996,7 +1082,25 @@ function AdapterTypeDropdown({
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
-        <button className="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-sm hover:bg-accent/50 transition-colors w-full justify-between">
+        {/* QA Finding 2 + 4 + 6 + 7 + 12 (WCAG 4.1.2 Name/Role/Value,
+         * 2.5.3 Label in Name, 2.4.7 Focus Visible, 1.4.11 Non-text Contrast):
+         * - type="button" prevents accidental form submission when this
+         *   trigger is used inside the edit-overlay form (Finding 12 parity).
+         * - aria-label="Select adapter type" gives the trigger an accessible
+         *   name independent of the visible (icon + label) content. The
+         *   surrounding Field wrapper at the call site provides a visible
+         *   label but its htmlFor linkage cannot reach this button through
+         *   the Popover/Radix abstraction, so an explicit aria-label is
+         *   required for assistive tech.
+         * - border-input (oklch(0.55)) replaces border-border (oklch(0.269))
+         *   to meet the 3:1 non-text-contrast minimum.
+         * - focus-visible:outline* ensures keyboard focus is visible with
+         *   the same 2px outline + 2px offset treatment used elsewhere. */}
+        <button
+          type="button"
+          aria-label="Select adapter type"
+          className="inline-flex items-center gap-1.5 rounded-md border border-input px-2.5 py-1.5 text-sm hover:bg-accent/50 transition-colors w-full justify-between focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2"
+        >
           <span className="inline-flex items-center gap-1.5">
             {value === "opencode_local" ? <OpenCodeLogoIcon className="h-3.5 w-3.5" /> : null}
             <span>{adapterLabels[value] ?? getAdapterLabel(value)}</span>
@@ -1008,9 +1112,10 @@ function AdapterTypeDropdown({
         {adapterList.map((item) => (
           <button
             key={item.value}
+            type="button"
             disabled={item.comingSoon}
             className={cn(
-              "flex items-center justify-between w-full px-2 py-1.5 text-sm rounded",
+              "flex items-center justify-between w-full px-2 py-1.5 text-sm rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2",
               item.comingSoon
                 ? "opacity-40 cursor-not-allowed"
                 : "hover:bg-accent/50",
@@ -1149,7 +1254,19 @@ function ModelDropdown({
         }}
       >
         <PopoverTrigger asChild>
-          <button type="button" className="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-sm hover:bg-accent/50 transition-colors w-full justify-between">
+          {/* QA Finding 2 + 4 + 6 + 7 (WCAG 4.1.2 Name/Role/Value, 2.5.3 Label in Name,
+           * 2.4.7 Focus Visible, 1.4.11 Non-text Contrast):
+           * - aria-label="Select model" gives the trigger an accessible name since
+           *   its visible text content can be a muted placeholder or a model id.
+           * - border-input (oklch(0.55)) replaces border-border (oklch(0.269))
+           *   to meet the 3:1 non-text-contrast minimum.
+           * - focus-visible:outline* ensures keyboard focus is visible with ≥3:1
+           *   contrast and consistent 2px outline + 2px offset treatment. */}
+          <button
+            type="button"
+            aria-label="Select model"
+            className="inline-flex items-center gap-1.5 rounded-md border border-input px-2.5 py-1.5 text-sm hover:bg-accent/50 transition-colors w-full justify-between focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2"
+          >
             <span className={cn(!value && "text-muted-foreground")}>
               {selected
                 ? selected.label
@@ -1160,17 +1277,38 @@ function ModelDropdown({
         </PopoverTrigger>
         <PopoverContent className="w-[var(--radix-popover-trigger-width)] p-1" align="start">
           <div className="relative mb-1">
+            {/* QA Finding 2 + 6 + 7 (WCAG 4.1.2 Name/Role/Value, 2.4.7 Focus Visible,
+             * 1.4.3 Contrast, 1.4.11 Non-text Contrast):
+             * - type="search" + aria-label="Search models" provides a semantic
+             *   role and an accessible name for assistive tech.
+             * - border-input (oklch(0.55)) replaces border-border to meet the
+             *   3:1 non-text-contrast minimum on the bottom border.
+             * - placeholder opacity raised from /50 to /70 so placeholder text
+             *   meets the 4.5:1 minimum contrast against the popover surface.
+             * - outline-none replaced with focus-visible:outline* so keyboard
+             *   focus now produces a visible high-contrast ring. */}
             <input
-              className="w-full px-2 py-1.5 pr-6 text-xs bg-transparent outline-none border-b border-border placeholder:text-muted-foreground/50"
+              type="search"
+              aria-label="Search models"
+              className="w-full px-2 py-1.5 pr-6 text-xs bg-transparent border-b border-input placeholder:text-muted-foreground/70 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2"
               placeholder={creatable ? "Search models... (type to create)" : "Search models..."}
               value={modelSearch}
               onChange={(e) => setModelSearch(e.target.value)}
               autoFocus
             />
             {modelSearch && (
+              /* QA Finding 4 + 6 (WCAG 4.1.2 Name/Role/Value for icon-only
+               * button, 2.4.7 Focus Visible):
+               * - aria-label="Clear search" gives this icon-only control an
+               *   accessible name since its only content is a decorative svg.
+               * - focus-visible:outline* ensures the clear-search control is
+               *   reachable and distinguishable via keyboard navigation.
+               * - svg retains aria-hidden="true" focusable="false" so screen
+               *   readers announce the button's aria-label, not the svg. */
               <button
                 type="button"
-                className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                aria-label="Clear search"
+                className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 rounded-sm"
                 onClick={() => setModelSearch("")}
               >
                 <svg aria-hidden="true" focusable="false" className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -1183,7 +1321,7 @@ function ModelDropdown({
           {onDetectModel && !modelSearch.trim() && (
             <button
               type="button"
-              className="flex items-center gap-1.5 w-full px-2 py-1.5 text-xs rounded hover:bg-accent/50 text-muted-foreground"
+              className="flex items-center gap-1.5 w-full px-2 py-1.5 text-xs rounded hover:bg-accent/50 text-muted-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2"
               onClick={() => {
                 void handleDetectModel();
               }}
@@ -1200,7 +1338,7 @@ function ModelDropdown({
             <button
               type="button"
               className={cn(
-                "flex items-center w-full px-2 py-1.5 text-sm rounded bg-accent/50",
+                "flex items-center w-full px-2 py-1.5 text-sm rounded bg-accent/50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2",
               )}
               onClick={() => {
                 onOpenChange(false);
@@ -1218,7 +1356,7 @@ function ModelDropdown({
             <button
               type="button"
               className={cn(
-                "flex items-center w-full px-2 py-1.5 text-sm rounded hover:bg-accent/50",
+                "flex items-center w-full px-2 py-1.5 text-sm rounded hover:bg-accent/50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2",
               )}
               onClick={() => {
                 onChange(detectedModel);
@@ -1242,7 +1380,7 @@ function ModelDropdown({
                   key={`detected-${candidate}`}
                   type="button"
                   className={cn(
-                    "flex items-center w-full px-2 py-1.5 text-sm rounded hover:bg-accent/50",
+                    "flex items-center w-full px-2 py-1.5 text-sm rounded hover:bg-accent/50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2",
                   )}
                   onClick={() => {
                     onChange(candidate);
@@ -1263,7 +1401,7 @@ function ModelDropdown({
               <button
                 type="button"
                 className={cn(
-                  "flex items-center gap-2 w-full px-2 py-1.5 text-sm rounded hover:bg-accent/50",
+                  "flex items-center gap-2 w-full px-2 py-1.5 text-sm rounded hover:bg-accent/50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2",
                   !value && "bg-accent",
                 )}
                 onClick={() => {
@@ -1277,7 +1415,7 @@ function ModelDropdown({
             {canCreateManualModel && (
               <button
                 type="button"
-                className="flex items-center justify-between gap-2 w-full px-2 py-1.5 text-sm rounded hover:bg-accent/50"
+                className="flex items-center justify-between gap-2 w-full px-2 py-1.5 text-sm rounded hover:bg-accent/50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2"
                 onClick={() => {
                   onChange(manualModel);
                   onOpenChange(false);
@@ -1300,7 +1438,7 @@ function ModelDropdown({
                     type="button"
                     key={m.id}
                     className={cn(
-                      "flex items-center w-full px-2 py-1.5 text-sm rounded hover:bg-accent/50",
+                      "flex items-center w-full px-2 py-1.5 text-sm rounded hover:bg-accent/50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2",
                       m.id === value && "bg-accent",
                     )}
                     onClick={() => {
@@ -1350,7 +1488,27 @@ function ThinkingEffortDropdown({
     <Field label="Thinking effort" hint={help.thinkingEffort}>
       <Popover open={open} onOpenChange={onOpenChange}>
         <PopoverTrigger asChild>
-          <button className="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-sm hover:bg-accent/50 transition-colors w-full justify-between">
+          {/* QA Finding 2 + 4 + 6 + 7 + 12 (WCAG 4.1.2 Name/Role/Value,
+           * 2.5.3 Label in Name, 2.4.7 Focus Visible, 1.4.11 Non-text Contrast):
+           * - type="button" prevents accidental form submission when this
+           *   trigger is used inside the edit-overlay form (Finding 12 parity
+           *   with AdapterTypeDropdown and ModelDropdown sibling triggers).
+           * - aria-label="Select thinking effort" gives the trigger an
+           *   accessible name independent of the visible label content. The
+           *   surrounding Field wrapper provides a visible label but its
+           *   htmlFor linkage cannot reach this button through the
+           *   Popover/Radix abstraction, so an explicit aria-label is
+           *   required for assistive tech.
+           * - border-input (oklch(0.55)) replaces border-border (oklch(0.269))
+           *   to meet the 3:1 non-text-contrast minimum.
+           * - focus-visible:outline* ensures keyboard focus is visible with
+           *   the same 2px outline + 2px offset treatment used on sibling
+           *   AdapterTypeDropdown and ModelDropdown PopoverTriggers. */}
+          <button
+            type="button"
+            aria-label="Select thinking effort"
+            className="inline-flex items-center gap-1.5 rounded-md border border-input px-2.5 py-1.5 text-sm hover:bg-accent/50 transition-colors w-full justify-between focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2"
+          >
             <span className={cn(!value && "text-muted-foreground")}>{selected?.label ?? "Auto"}</span>
             <ChevronDown className="h-3 w-3 text-muted-foreground" />
           </button>
@@ -1359,8 +1517,9 @@ function ThinkingEffortDropdown({
           {options.map((option) => (
             <button
               key={option.id || "auto"}
+              type="button"
               className={cn(
-                "flex items-center justify-between w-full px-2 py-1.5 text-sm rounded hover:bg-accent/50",
+                "flex items-center justify-between w-full px-2 py-1.5 text-sm rounded hover:bg-accent/50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2",
                 option.id === value && "bg-accent",
               )}
               onClick={() => {
