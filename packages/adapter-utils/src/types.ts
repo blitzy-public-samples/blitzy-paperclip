@@ -473,7 +473,7 @@ export interface InheritedConnectorsConfig {
  * into the run's stderr stream for forensic replay.
  */
 export interface ConnectorAuditRecord {
-  /** ISO 8601 timestamp. */
+  /** ISO 8601 UTC timestamp (trailing `Z`). Produced via `Date.prototype.toISOString()`. */
   ts: string;
   /** Agent ID that initiated the invocation. */
   agentId: string;

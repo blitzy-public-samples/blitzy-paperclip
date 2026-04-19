@@ -1,6 +1,28 @@
 export const type = "codex_local";
 export const label = "Codex (local)";
 export const DEFAULT_CODEX_LOCAL_MODEL = "gpt-5.3-codex";
+/**
+ * Default value applied to `dangerouslyBypassApprovalsAndSandbox` when a
+ * `codex_local` agent is created without the caller specifying it explicitly.
+ *
+ * Security-driven flip: as part of GHSA-gqqj-85qm-8qhf (CWE-284, CVSS 8.7 High)
+ * this default was changed from `true` to `false`. Setting `true` bypasses the
+ * Codex CLI approval and sandbox gates (invoked via
+ * `--dangerously-bypass-approvals-and-sandbox`), which, combined with the
+ * previously-unfiltered inheritance of ChatGPT/OpenAI-curated connector state
+ * into the managed `CODEX_HOME`, enabled silent outward writes (e.g., Gmail
+ * send) from newly created agents. Shipping `false` as the default restores
+ * per-invocation approval gates by default.
+ *
+ * Callers MAY still pass `dangerouslyBypassApprovalsAndSandbox: true`
+ * explicitly — the flag remains fully functional; only the implicit default
+ * changed. Enable `true` only inside a hardened, isolated environment
+ * (non-production or equivalently protected sandbox). Existing agent records
+ * already persisted with `true` are not retroactively mutated.
+ *
+ * See: SECURITY.md (Disclosed Advisories) and the advisory at
+ * https://github.com/paperclipai/paperclip/security/advisories/GHSA-gqqj-85qm-8qhf
+ */
 export const DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX = false;
 export const CODEX_LOCAL_FAST_MODE_SUPPORTED_MODELS = ["gpt-5.4"] as const;
 
