@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "@/lib/router";
 import { useCompany } from "../context/CompanyContext";
@@ -66,6 +66,13 @@ export function NewAgent() {
   const [selectedSkillKeys, setSelectedSkillKeys] = useState<string[]>([]);
   const [roleOpen, setRoleOpen] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  // Synchronous ref-based guard — catches sub-millisecond double-clicks before
+  // React re-renders the `isSubmitting` state and before the mutation flips
+  // `createAgent.isPending`. Without this guard, two synchronous click() calls
+  // on the submit button (e.g. from double-click or a browser auto-retry during
+  // a slow network) both pass the state check and both fire the mutation.
+  const isSubmittingRef = useRef(false);
 
   const { data: agents } = useQuery({
     queryKey: queryKeys.agents.list(selectedCompanyId!),
@@ -130,6 +137,13 @@ export function NewAgent() {
     onError: (error) => {
       setFormError(error instanceof Error ? error.message : "Failed to create agent");
     },
+    onSettled: () => {
+      // Reset the submission guards after the mutation completes (success or error)
+      // so the user can retry on failure. On success the component has already
+      // navigated away and the setState is a harmless no-op.
+      isSubmittingRef.current = false;
+      setIsSubmitting(false);
+    },
   });
 
   function buildAdapterConfig() {
@@ -138,6 +152,11 @@ export function NewAgent() {
   }
 
   function handleSubmit() {
+    // Dual-guard double-submit prevention: the ref blocks sub-millisecond
+    // double-clicks before React can re-render with `isSubmitting=true`,
+    // and `createAgent.isPending` blocks any click after the mutation has
+    // fired (which only transitions on the next React tick).
+    if (isSubmittingRef.current || createAgent.isPending) return;
     if (!selectedCompanyId || !name.trim()) return;
     setFormError(null);
     if (configValues.adapterType === "opencode_local") {
@@ -168,6 +187,10 @@ export function NewAgent() {
         return;
       }
     }
+    // Arm the guards synchronously so any second click that arrives before the
+    // next React render (i.e. before `createAgent.isPending` flips) is caught.
+    isSubmittingRef.current = true;
+    setIsSubmitting(true);
     createAgent.mutate({
       name: name.trim(),
       role: effectiveRole,
@@ -207,8 +230,12 @@ export function NewAgent() {
       <div className="border border-border">
         {/* Name */}
         <div className="px-4 pt-4 pb-2">
+          <label htmlFor="new-agent-name" className="sr-only">
+            Agent name
+          </label>
           <input
-            className="w-full text-lg font-semibold bg-transparent outline-none placeholder:text-muted-foreground/50"
+            id="new-agent-name"
+            className="w-full rounded-sm text-lg font-semibold bg-transparent placeholder:text-muted-foreground/70 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2"
             placeholder="Agent name"
             value={name}
             onChange={(e) => setName(e.target.value)}
@@ -218,8 +245,12 @@ export function NewAgent() {
 
         {/* Title */}
         <div className="px-4 pb-2">
+          <label htmlFor="new-agent-title" className="sr-only">
+            Agent title
+          </label>
           <input
-            className="w-full bg-transparent outline-none text-sm text-muted-foreground placeholder:text-muted-foreground/40"
+            id="new-agent-title"
+            className="w-full rounded-sm bg-transparent text-sm text-muted-foreground placeholder:text-muted-foreground/70 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2"
             placeholder="Title (e.g. VP of Engineering)"
             value={title}
             onChange={(e) => setTitle(e.target.value)}
@@ -231,22 +262,27 @@ export function NewAgent() {
           <Popover open={roleOpen} onOpenChange={setRoleOpen}>
             <PopoverTrigger asChild>
               <button
+                type="button"
+                aria-label={`Select role (currently ${roleLabels[effectiveRole] ?? effectiveRole})`}
+                aria-expanded={roleOpen}
+                aria-haspopup="listbox"
                 className={cn(
-                  "inline-flex items-center gap-1.5 rounded-md border border-border px-2 py-1 text-xs hover:bg-accent/50 transition-colors",
+                  "inline-flex items-center gap-1.5 rounded-md border border-input px-2 py-1 text-xs hover:bg-accent/50 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2",
                   isFirstAgent && "opacity-60 cursor-not-allowed"
                 )}
                 disabled={isFirstAgent}
               >
-                <Shield className="h-3 w-3 text-muted-foreground" />
+                <Shield className="h-3 w-3 text-muted-foreground" aria-hidden="true" />
                 {roleLabels[effectiveRole] ?? effectiveRole}
               </button>
             </PopoverTrigger>
             <PopoverContent className="w-36 p-1" align="start">
               {AGENT_ROLES.map((r) => (
                 <button
+                  type="button"
                   key={r}
                   className={cn(
-                    "flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded hover:bg-accent/50",
+                    "flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded hover:bg-accent/50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2",
                     r === role && "bg-accent"
                   )}
                   onClick={() => { setRole(r); setRoleOpen(false); }}
@@ -325,10 +361,11 @@ export function NewAgent() {
             </Button>
             <Button
               size="sm"
-              disabled={!name.trim() || createAgent.isPending}
+              disabled={!name.trim() || createAgent.isPending || isSubmitting}
+              aria-busy={createAgent.isPending || isSubmitting}
               onClick={handleSubmit}
             >
-              {createAgent.isPending ? "Creating…" : "Create agent"}
+              {createAgent.isPending || isSubmitting ? "Creating…" : "Create agent"}
             </Button>
           </div>
         </div>

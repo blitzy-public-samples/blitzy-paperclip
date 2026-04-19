@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useId, createContext, useContext } from "react";
 import {
   Tooltip,
   TooltipTrigger,
@@ -69,12 +69,35 @@ export const roleLabels = AGENT_ROLE_LABELS as Record<string, string>;
 
 /* ---- Primitive components ---- */
 
-export function HintIcon({ text }: { text: string }) {
+/**
+ * Context that propagates a generated `id` from a labelled container (`Field`,
+ * `InlineField`, etc.) down to nested input primitives so that form controls
+ * can automatically wire up `id`/`htmlFor` associations for screen readers
+ * (WCAG 2.1 AA — 1.3.1 Info and Relationships, 4.1.2 Name, Role, Value).
+ */
+const FieldContext = createContext<{ id: string } | null>(null);
+
+/**
+ * Consumer hook used by input primitives (`DraftInput`, `DraftTextarea`,
+ * `DraftNumberInput`, `AutoExpandTextarea`) to retrieve the container-
+ * provided `id`. Returns `undefined` when the input is not rendered inside
+ * a `Field`/`InlineField` (in which case the caller retains full control
+ * over the `id` attribute via props).
+ */
+function useFieldId(): string | undefined {
+  return useContext(FieldContext)?.id;
+}
+
+export function HintIcon({ text, ariaLabel }: { text: string; ariaLabel?: string }) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <button type="button" className="inline-flex text-muted-foreground/50 hover:text-muted-foreground transition-colors">
-          <HelpCircle className="h-3 w-3" />
+        <button
+          type="button"
+          aria-label={ariaLabel ?? text}
+          className="inline-flex rounded-sm text-muted-foreground hover:text-foreground transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2"
+        >
+          <HelpCircle className="h-3 w-3" aria-hidden="true" />
         </button>
       </TooltipTrigger>
       <TooltipContent side="top" className="max-w-xs">
@@ -84,14 +107,36 @@ export function HintIcon({ text }: { text: string }) {
   );
 }
 
-export function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
+export function Field({
+  label,
+  hint,
+  children,
+  id: idProp,
+}: {
+  label: string;
+  hint?: string;
+  children: React.ReactNode;
+  /**
+   * Optional id override. When omitted, a stable id is generated via
+   * `useId()` and provided through `FieldContext` so nested input primitives
+   * (`DraftInput`, `DraftTextarea`, `DraftNumberInput`, `AutoExpandTextarea`)
+   * can pick it up automatically for `<label htmlFor>` → `<input id>`
+   * association. WCAG 2.1 AA — 1.3.1 Info and Relationships, 4.1.2 Name,
+   * Role, Value.
+   */
+  id?: string;
+}) {
+  const generatedId = useId();
+  const id = idProp ?? generatedId;
   return (
     <div>
       <div className="flex items-center gap-1.5 mb-1">
-        <label className="text-xs text-muted-foreground">{label}</label>
-        {hint && <HintIcon text={hint} />}
+        <label htmlFor={id} className="text-xs text-muted-foreground">
+          {label}
+        </label>
+        {hint && <HintIcon text={hint} ariaLabel={`${label} — help`} />}
       </div>
-      {children}
+      <FieldContext.Provider value={{ id }}>{children}</FieldContext.Provider>
     </div>
   );
 }
@@ -102,22 +147,38 @@ export function ToggleField({
   checked,
   onChange,
   toggleTestId,
+  ariaLabel,
+  id: idProp,
 }: {
   label: string;
   hint?: string;
   checked: boolean;
   onChange: (v: boolean) => void;
   toggleTestId?: string;
+  /**
+   * Optional explicit accessible name for the underlying switch. Defaults to
+   * the visible `label` text. Security-sensitive toggles (e.g. "Bypass
+   * sandbox") SHOULD pass an explicit value to make the purpose unambiguous
+   * for assistive technology. WCAG 2.1 AA — 4.1.2 Name, Role, Value.
+   */
+  ariaLabel?: string;
+  id?: string;
 }) {
+  const generatedId = useId();
+  const id = idProp ?? generatedId;
   return (
     <div className="flex items-center justify-between">
       <div className="flex items-center gap-1.5">
-        <span className="text-xs text-muted-foreground">{label}</span>
-        {hint && <HintIcon text={hint} />}
+        <label htmlFor={id} className="text-xs text-muted-foreground cursor-pointer">
+          {label}
+        </label>
+        {hint && <HintIcon text={hint} ariaLabel={`${label} — help`} />}
       </div>
       <ToggleSwitch
+        id={id}
         checked={checked}
         onCheckedChange={onChange}
+        aria-label={ariaLabel ?? label}
         data-testid={toggleTestId}
       />
     </div>
@@ -135,6 +196,10 @@ export function ToggleWithNumber({
   numberHint,
   numberPrefix,
   showNumber,
+  ariaLabel,
+  numberAriaLabel,
+  id: idProp,
+  numberId: numberIdProp,
 }: {
   label: string;
   hint?: string;
@@ -146,30 +211,64 @@ export function ToggleWithNumber({
   numberHint?: string;
   numberPrefix?: string;
   showNumber: boolean;
+  /**
+   * Optional explicit accessible name for the toggle switch. Defaults to the
+   * visible `label` text. WCAG 2.1 AA — 4.1.2 Name, Role, Value.
+   */
+  ariaLabel?: string;
+  /**
+   * Optional explicit accessible name for the number input. Defaults to a
+   * composite of `numberPrefix` + visible `numberLabel` so screen readers
+   * announce the full control purpose (e.g. "Every 30 seconds"). WCAG 2.1 AA
+   * — 4.1.2, 1.3.1.
+   */
+  numberAriaLabel?: string;
+  id?: string;
+  numberId?: string;
 }) {
+  const generatedToggleId = useId();
+  const generatedNumberId = useId();
+  const toggleId = idProp ?? generatedToggleId;
+  const numberInputId = numberIdProp ?? generatedNumberId;
+  const composedNumberAriaLabel =
+    numberAriaLabel ??
+    (numberPrefix ? `${numberPrefix} ${numberLabel}`.trim() : numberLabel);
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-1.5">
-          <span className="text-xs text-muted-foreground">{label}</span>
-          {hint && <HintIcon text={hint} />}
+          <label
+            htmlFor={toggleId}
+            className="text-xs text-muted-foreground cursor-pointer"
+          >
+            {label}
+          </label>
+          {hint && <HintIcon text={hint} ariaLabel={`${label} — help`} />}
         </div>
         <ToggleSwitch
+          id={toggleId}
           checked={checked}
           onCheckedChange={onCheckedChange}
+          aria-label={ariaLabel ?? label}
         />
       </div>
       {showNumber && (
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
           {numberPrefix && <span>{numberPrefix}</span>}
           <input
+            id={numberInputId}
             type="number"
-            className="w-16 rounded-md border border-border px-2 py-0.5 bg-transparent outline-none text-xs font-mono text-center"
+            aria-label={composedNumberAriaLabel}
+            className="w-16 rounded-md border border-input px-2 py-0.5 bg-transparent text-xs font-mono text-center focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2"
             value={number}
             onChange={(e) => onNumberChange(Number(e.target.value))}
           />
-          <span>{numberLabel}</span>
-          {numberHint && <HintIcon text={numberHint} />}
+          <label htmlFor={numberInputId} className="cursor-pointer">
+            {numberLabel}
+          </label>
+          {numberHint && (
+            <HintIcon text={numberHint} ariaLabel={`${numberLabel} — help`} />
+          )}
         </div>
       )}
     </div>
@@ -191,17 +290,24 @@ export function CollapsibleSection({
   bordered?: boolean;
   children: React.ReactNode;
 }) {
+  // Use a stable id tying the disclosure button to its region so AT users
+  // can navigate between the trigger and the revealed content. WCAG 2.1 AA
+  // — 4.1.2 Name, Role, Value (aria-expanded/aria-controls).
+  const regionId = useId();
   return (
     <div className={cn(bordered && "border-t border-border")}>
       <button
-        className="flex items-center gap-2 w-full px-4 py-2 text-xs font-medium text-muted-foreground hover:bg-accent/30 transition-colors"
+        type="button"
+        aria-expanded={open}
+        aria-controls={regionId}
+        className="flex items-center gap-2 w-full px-4 py-2 text-xs font-medium text-muted-foreground hover:bg-accent/30 hover:text-foreground transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 focus-visible:rounded-sm"
         onClick={onToggle}
       >
-        {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+        {open ? <ChevronDown aria-hidden className="h-3 w-3" /> : <ChevronRight aria-hidden className="h-3 w-3" />}
         {icon}
         {title}
       </button>
-      {open && <div className="px-4 pb-3">{children}</div>}
+      {open && <div id={regionId} className="px-4 pb-3">{children}</div>}
     </div>
   );
 }
@@ -212,17 +318,28 @@ export function AutoExpandTextarea({
   onBlur,
   placeholder,
   minRows,
+  id: idProp,
+  "aria-label": ariaLabelProp,
+  ...rest
 }: {
   value: string;
   onChange: (v: string) => void;
   onBlur?: () => void;
   placeholder?: string;
   minRows?: number;
-}) {
+} & Omit<
+  React.TextareaHTMLAttributes<HTMLTextAreaElement>,
+  "value" | "onChange" | "onBlur" | "placeholder" | "style" | "ref"
+>) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const rows = minRows ?? 3;
   const lineHeight = 20;
   const minHeight = rows * lineHeight;
+  // Auto-wire the `id` from the surrounding <Field> so `<label htmlFor>`
+  // associates with this textarea. Explicit prop takes precedence. WCAG
+  // 2.1 AA — 1.3.1, 4.1.2.
+  const contextId = useFieldId();
+  const id = idProp ?? contextId;
 
   const adjustHeight = useCallback(() => {
     const el = textareaRef.current;
@@ -236,12 +353,15 @@ export function AutoExpandTextarea({
   return (
     <textarea
       ref={textareaRef}
-      className="w-full rounded-md border border-border px-2.5 py-1.5 bg-transparent outline-none text-sm font-mono placeholder:text-muted-foreground/40 resize-none overflow-hidden"
+      id={id}
+      aria-label={ariaLabelProp}
+      className="w-full rounded-md border border-input px-2.5 py-1.5 bg-transparent text-sm font-mono placeholder:text-muted-foreground/70 resize-none overflow-hidden focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2"
       placeholder={placeholder}
       value={value}
       onChange={(e) => onChange(e.target.value)}
       onBlur={onBlur}
       style={{ minHeight }}
+      {...rest}
     />
   );
 }
@@ -249,12 +369,18 @@ export function AutoExpandTextarea({
 /**
  * Text input that manages internal draft state.
  * Calls `onCommit` on blur (and optionally on every change if `immediate` is set).
+ *
+ * Auto-consumes the nearest `<Field>` id via {@link useFieldId} so the
+ * surrounding `<label htmlFor>` associates with this input unless an explicit
+ * `id` prop is supplied. WCAG 2.1 AA — 1.3.1 Info and Relationships,
+ * 4.1.2 Name, Role, Value.
  */
 export function DraftInput({
   value,
   onCommit,
   immediate,
   className,
+  id: idProp,
   ...props
 }: {
   value: string;
@@ -264,9 +390,12 @@ export function DraftInput({
 } & Omit<React.InputHTMLAttributes<HTMLInputElement>, "value" | "onChange" | "className">) {
   const [draft, setDraft] = useState(value);
   useEffect(() => setDraft(value), [value]);
+  const contextId = useFieldId();
+  const id = idProp ?? contextId;
 
   return (
     <input
+      id={id}
       className={className}
       value={draft}
       onChange={(e) => {
@@ -283,6 +412,13 @@ export function DraftInput({
 
 /**
  * Auto-expanding textarea with draft state and blur-commit.
+ *
+ * Accepts all standard `<textarea>` attributes (except the reserved
+ * `value`/`onChange`/`onBlur`/`placeholder`/`style`/`ref`) so callers may
+ * supply `aria-label`, `aria-describedby`, etc. When no explicit `id` is
+ * provided, the `id` from the surrounding `<Field>` is auto-consumed via
+ * {@link useFieldId} so `<label htmlFor>` associates with the textarea.
+ * WCAG 2.1 AA — 1.3.1, 2.4.7, 4.1.2.
  */
 export function DraftTextarea({
   value,
@@ -290,13 +426,19 @@ export function DraftTextarea({
   immediate,
   placeholder,
   minRows,
+  id: idProp,
+  "aria-label": ariaLabelProp,
+  ...rest
 }: {
   value: string;
   onCommit: (v: string) => void;
   immediate?: boolean;
   placeholder?: string;
   minRows?: number;
-}) {
+} & Omit<
+  React.TextareaHTMLAttributes<HTMLTextAreaElement>,
+  "value" | "onChange" | "onBlur" | "placeholder" | "style" | "ref"
+>) {
   const [draft, setDraft] = useState(value);
   useEffect(() => setDraft(value), [value]);
 
@@ -304,6 +446,8 @@ export function DraftTextarea({
   const rows = minRows ?? 3;
   const lineHeight = 20;
   const minHeight = rows * lineHeight;
+  const contextId = useFieldId();
+  const id = idProp ?? contextId;
 
   const adjustHeight = useCallback(() => {
     const el = textareaRef.current;
@@ -317,7 +461,9 @@ export function DraftTextarea({
   return (
     <textarea
       ref={textareaRef}
-      className="w-full rounded-md border border-border px-2.5 py-1.5 bg-transparent outline-none text-sm font-mono placeholder:text-muted-foreground/40 resize-none overflow-hidden"
+      id={id}
+      aria-label={ariaLabelProp}
+      className="w-full rounded-md border border-input px-2.5 py-1.5 bg-transparent text-sm font-mono placeholder:text-muted-foreground/70 resize-none overflow-hidden focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2"
       placeholder={placeholder}
       value={draft}
       onChange={(e) => {
@@ -328,18 +474,24 @@ export function DraftTextarea({
         if (draft !== value) onCommit(draft);
       }}
       style={{ minHeight }}
+      {...rest}
     />
   );
 }
 
 /**
  * Number input with draft state and blur-commit.
+ *
+ * Auto-consumes the nearest `<Field>` id via {@link useFieldId} so the
+ * surrounding `<label htmlFor>` associates with this input unless an explicit
+ * `id` prop is supplied. WCAG 2.1 AA — 1.3.1, 4.1.2.
  */
 export function DraftNumberInput({
   value,
   onCommit,
   immediate,
   className,
+  id: idProp,
   ...props
 }: {
   value: number;
@@ -349,9 +501,12 @@ export function DraftNumberInput({
 } & Omit<React.InputHTMLAttributes<HTMLInputElement>, "value" | "onChange" | "className" | "type">) {
   const [draft, setDraft] = useState(String(value));
   useEffect(() => setDraft(String(value)), [value]);
+  const contextId = useFieldId();
+  const id = idProp ?? contextId;
 
   return (
     <input
+      id={id}
       type="number"
       className={className}
       value={draft}
@@ -378,7 +533,7 @@ export function ChoosePathButton() {
     <>
       <button
         type="button"
-        className="inline-flex items-center rounded-md border border-border px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent/50 transition-colors shrink-0"
+        className="inline-flex items-center rounded-md border border-input px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent/50 hover:text-foreground transition-colors shrink-0 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2"
         onClick={() => setOpen(true)}
       >
         Choose
@@ -439,15 +594,38 @@ export function ChoosePathButton() {
 
 /**
  * Label + input rendered on the same line (inline layout for compact fields).
+ *
+ * The `<label>` is wired to the child control via `htmlFor` / `id`. An `id`
+ * is auto-generated when not supplied, and the child control auto-consumes
+ * that id through the `FieldContext` provided below. Callers using
+ * primitives that do not consume the context may pass an explicit `id`
+ * and pair it with a matching `id` attribute on the rendered control.
+ * WCAG 2.1 AA — 1.3.1 Info and Relationships, 4.1.2 Name, Role, Value.
  */
-export function InlineField({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
+export function InlineField({
+  label,
+  hint,
+  children,
+  id: idProp,
+}: {
+  label: string;
+  hint?: string;
+  children: React.ReactNode;
+  id?: string;
+}) {
+  const reactId = useId();
+  const id = idProp ?? reactId;
   return (
     <div className="flex items-center gap-3">
       <div className="flex items-center gap-1.5 shrink-0">
-        <label className="text-xs text-muted-foreground">{label}</label>
-        {hint && <HintIcon text={hint} />}
+        <label htmlFor={id} className="text-xs text-muted-foreground">{label}</label>
+        {hint && <HintIcon text={hint} ariaLabel={`${label} — help`} />}
       </div>
-      <div className="w-24 ml-auto">{children}</div>
+      <div className="w-24 ml-auto">
+        <FieldContext.Provider value={{ id }}>
+          {children}
+        </FieldContext.Provider>
+      </div>
     </div>
   );
 }

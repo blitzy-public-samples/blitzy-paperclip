@@ -4,7 +4,7 @@ import { X } from "lucide-react";
 import { cn } from "../lib/utils";
 
 const inputClass =
-  "w-full rounded-md border border-border px-2.5 py-1.5 bg-transparent outline-none text-sm font-mono placeholder:text-muted-foreground/40";
+  "w-full rounded-md border border-input px-2.5 py-1.5 bg-transparent text-sm font-mono placeholder:text-muted-foreground/70 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2";
 
 type Row = {
   key: string;
@@ -170,11 +170,13 @@ export function EnvVarEditor({
             <input
               className={cn(inputClass, "flex-[2]")}
               placeholder="KEY"
+              aria-label="Environment variable key"
               value={row.key}
               onChange={(event) => updateRow(index, { key: event.target.value })}
             />
             <select
               className={cn(inputClass, "flex-[1] bg-background")}
+              aria-label="Environment variable source"
               value={row.source}
               onChange={(event) =>
                 updateRow(index, {
@@ -190,6 +192,7 @@ export function EnvVarEditor({
               <>
                 <select
                   className={cn(inputClass, "flex-[3] bg-background")}
+                  aria-label="Select secret"
                   value={row.secretId}
                   onChange={(event) => updateRow(index, { secretId: event.target.value })}
                 >
@@ -202,7 +205,7 @@ export function EnvVarEditor({
                 </select>
                 <button
                   type="button"
-                  className="inline-flex items-center rounded-md border border-border px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent/50 transition-colors shrink-0"
+                  className="inline-flex items-center rounded-md border border-input px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent/50 transition-colors shrink-0 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2"
                   onClick={() => sealRow(index)}
                   disabled={!row.key.trim() || !row.plainValue}
                   title="Create secret from current plain value"
@@ -215,12 +218,13 @@ export function EnvVarEditor({
                 <input
                   className={cn(inputClass, "flex-[3]")}
                   placeholder="value"
+                  aria-label="Environment variable value"
                   value={row.plainValue}
                   onChange={(event) => updateRow(index, { plainValue: event.target.value })}
                 />
                 <button
                   type="button"
-                  className="inline-flex items-center rounded-md border border-border px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent/50 transition-colors shrink-0"
+                  className="inline-flex items-center rounded-md border border-input px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent/50 transition-colors shrink-0 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2"
                   onClick={() => sealRow(index)}
                   disabled={!row.key.trim() || !row.plainValue}
                   title="Store value as secret and replace with reference"
@@ -232,8 +236,9 @@ export function EnvVarEditor({
             {!isTrailing ? (
               <button
                 type="button"
-                className="shrink-0 p-1 rounded hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-colors"
+                className="shrink-0 p-1 rounded hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2"
                 onClick={() => removeRow(index)}
+                aria-label="Remove environment variable"
               >
                 <X className="h-3.5 w-3.5" />
               </button>

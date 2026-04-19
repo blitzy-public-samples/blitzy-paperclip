@@ -12,8 +12,15 @@ import {
   isCodexLocalFastModeSupported,
 } from "@paperclipai/adapter-codex-local";
 
+// WCAG 2.1 AA styling contract for the codex-local config input:
+//  - `border-input` consumes the raised `--input` theme token (3.89:1 L / 3.97:1 D)
+//    so the field is discernible per 1.4.11 Non-text Contrast.
+//  - `placeholder:text-muted-foreground/70` raises placeholder opacity to meet
+//    3:1 minimum for informational UI text (1.4.11).
+//  - `focus-visible` outline utilities restore the visible focus indicator that
+//    the removed `outline-none` used to suppress — required by 2.4.7 Focus Visible.
 const inputClass =
-  "w-full rounded-md border border-border px-2.5 py-1.5 bg-transparent outline-none text-sm font-mono placeholder:text-muted-foreground/40";
+  "w-full rounded-md border border-input px-2.5 py-1.5 bg-transparent text-sm font-mono placeholder:text-muted-foreground/70 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2";
 const instructionsFileHint =
   "Absolute path to a markdown file (e.g. AGENTS.md) that defines this agent's behavior. Injected into the system prompt at runtime. Note: Codex may still auto-apply repo-scoped AGENTS.md files from the workspace.";
 
@@ -92,6 +99,15 @@ export function CodexLocalConfigFields({
       )}
       <ToggleField
         label="Bypass sandbox"
+        // Explicit accessible name for the underlying switch — per the
+        // `ToggleField` primitive's JSDoc guidance, security-sensitive
+        // toggles SHOULD pass an unambiguous name so assistive technology
+        // users understand that flipping this removes Codex approval and
+        // sandbox gates. Without this, a screen reader would announce only
+        // "Bypass sandbox, switch" which is easy to misread as a general
+        // sandbox escape rather than the specific security-critical behavior
+        // it controls. WCAG 2.1 AA — 4.1.2 Name, Role, Value.
+        ariaLabel="Bypass Codex approval and sandbox gates (security-critical — leave off unless running in a hardened environment)"
         hint={help.dangerouslyBypassSandbox}
         checked={
           isCreate

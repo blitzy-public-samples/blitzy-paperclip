@@ -138,6 +138,13 @@ export function OnboardingWizard() {
     el.style.height = el.scrollHeight + "px";
   }, []);
 
+  // Dual-guard ref to prevent double-submission of async step handlers.
+  // React's `loading` state governs UI disable, but there is a microsecond
+  // window between click and React re-render where a second click can fire
+  // (observed 1.6ms apart in QA Finding 12). This synchronous ref is set
+  // immediately on handler entry and reset in finally, eliminating the race.
+  const isSubmittingRef = useRef(false);
+
   // Created entity IDs — pre-populate from existing company when skipping step 1
   const [createdCompanyId, setCreatedCompanyId] = useState<string | null>(
     existingCompanyId ?? null
@@ -380,6 +387,10 @@ export function OnboardingWizard() {
   }
 
   async function handleStep1Next() {
+    // Dual-guard: synchronous ref check prevents double-submission in the
+    // micro-race between click and React's `loading` state commit (QA Finding 12).
+    if (isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
     setLoading(true);
     setError(null);
     try {
@@ -412,11 +423,16 @@ export function OnboardingWizard() {
       setError(err instanceof Error ? err.message : "Failed to create company");
     } finally {
       setLoading(false);
+      isSubmittingRef.current = false;
     }
   }
 
   async function handleStep2Next() {
+    // Dual-guard: synchronous ref check prevents double-submission in the
+    // micro-race between click and React's `loading` state commit (QA Finding 12).
+    if (isSubmittingRef.current) return;
     if (!createdCompanyId) return;
+    isSubmittingRef.current = true;
     setLoading(true);
     setError(null);
     try {
@@ -474,6 +490,7 @@ export function OnboardingWizard() {
       setError(err instanceof Error ? err.message : "Failed to create agent");
     } finally {
       setLoading(false);
+      isSubmittingRef.current = false;
     }
   }
 
@@ -533,7 +550,11 @@ export function OnboardingWizard() {
   }
 
   async function handleLaunch() {
+    // Dual-guard: synchronous ref check prevents double-submission in the
+    // micro-race between click and React's `loading` state commit (QA Finding 12).
+    if (isSubmittingRef.current) return;
     if (!createdCompanyId || !createdAgentId) return;
+    isSubmittingRef.current = true;
     setLoading(true);
     setError(null);
     try {
@@ -588,6 +609,7 @@ export function OnboardingWizard() {
       setError(err instanceof Error ? err.message : "Failed to create task");
     } finally {
       setLoading(false);
+      isSubmittingRef.current = false;
     }
   }
 
@@ -621,8 +643,10 @@ export function OnboardingWizard() {
         <div className="fixed inset-0 z-50 flex" onKeyDown={handleKeyDown}>
           {/* Close button */}
           <button
+            type="button"
             onClick={handleClose}
-            className="absolute top-4 left-4 z-10 rounded-sm p-1.5 text-muted-foreground/60 hover:text-foreground transition-colors"
+            aria-label="Close onboarding wizard"
+            className="absolute top-4 left-4 z-10 rounded-sm p-1.5 text-muted-foreground/60 hover:text-foreground transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2"
           >
             <X className="h-5 w-5" />
             <span className="sr-only">Close</span>
@@ -651,11 +675,12 @@ export function OnboardingWizard() {
                     type="button"
                     onClick={() => setStep(s)}
                     className={cn(
-                      "flex items-center gap-1.5 px-3 py-2 text-xs font-medium border-b-2 -mb-px transition-colors cursor-pointer",
+                      "flex items-center gap-1.5 px-3 py-2 text-xs font-medium border-b-2 -mb-px transition-colors cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 focus-visible:rounded-sm",
                       s === step
                         ? "border-foreground text-foreground"
                         : "border-transparent text-muted-foreground hover:text-foreground/70 hover:border-border"
                     )}
+                    aria-current={s === step ? "page" : undefined}
                   >
                     <Icon className="h-3.5 w-3.5" />
                     {label}
@@ -679,6 +704,7 @@ export function OnboardingWizard() {
                   </div>
                   <div className="mt-3 group">
                     <label
+                      htmlFor="onboarding-company-name"
                       className={cn(
                         "text-xs mb-1 block transition-colors",
                         companyName.trim()
@@ -689,7 +715,8 @@ export function OnboardingWizard() {
                       Company name
                     </label>
                     <input
-                      className="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-ring placeholder:text-muted-foreground/50"
+                      id="onboarding-company-name"
+                      className="w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 placeholder:text-muted-foreground/70"
                       placeholder="Acme Corp"
                       value={companyName}
                       onChange={(e) => setCompanyName(e.target.value)}
@@ -698,6 +725,7 @@ export function OnboardingWizard() {
                   </div>
                   <div className="group">
                     <label
+                      htmlFor="onboarding-company-goal"
                       className={cn(
                         "text-xs mb-1 block transition-colors",
                         companyGoal.trim()
@@ -708,7 +736,8 @@ export function OnboardingWizard() {
                       Mission / goal (optional)
                     </label>
                     <textarea
-                      className="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-ring placeholder:text-muted-foreground/50 resize-none min-h-[60px]"
+                      id="onboarding-company-goal"
+                      className="w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 placeholder:text-muted-foreground/70 resize-none min-h-[60px]"
                       placeholder="What is this company trying to achieve?"
                       value={companyGoal}
                       onChange={(e) => setCompanyGoal(e.target.value)}
@@ -731,11 +760,15 @@ export function OnboardingWizard() {
                     </div>
                   </div>
                   <div>
-                    <label className="text-xs text-muted-foreground mb-1 block">
+                    <label
+                      htmlFor="onboarding-agent-name"
+                      className="text-xs text-muted-foreground mb-1 block"
+                    >
                       Agent name
                     </label>
                     <input
-                      className="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-ring placeholder:text-muted-foreground/50"
+                      id="onboarding-agent-name"
+                      className="w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 placeholder:text-muted-foreground/70"
                       placeholder="CEO"
                       value={agentName}
                       onChange={(e) => setAgentName(e.target.value)}
@@ -744,19 +777,25 @@ export function OnboardingWizard() {
                   </div>
 
                   {/* Adapter type radio cards */}
-                  <div>
-                    <label className="text-xs text-muted-foreground mb-2 block">
+                  <div role="radiogroup" aria-labelledby="onboarding-adapter-type-label">
+                    <div
+                      id="onboarding-adapter-type-label"
+                      className="text-xs text-muted-foreground mb-2 block"
+                    >
                       Adapter type
-                    </label>
+                    </div>
                     <div className="grid grid-cols-2 gap-2">
                       {recommendedAdapters.map((opt) => (
                         <button
                           key={opt.type}
+                          type="button"
+                          role="radio"
+                          aria-checked={adapterType === opt.type}
                           className={cn(
-                            "flex flex-col items-center gap-1.5 rounded-md border p-3 text-xs transition-colors relative",
+                            "flex flex-col items-center gap-1.5 rounded-md border p-3 text-xs transition-colors relative focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2",
                             adapterType === opt.type
                               ? "border-foreground bg-accent"
-                              : "border-border hover:bg-accent/50"
+                              : "border-input hover:bg-accent/50"
                           )}
                           onClick={() => {
                             const nextType = opt.type;
@@ -784,7 +823,9 @@ export function OnboardingWizard() {
                     </div>
 
                     <button
-                      className="flex items-center gap-1.5 mt-3 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                      type="button"
+                      aria-expanded={showMoreAdapters}
+                      className="flex items-center gap-1.5 mt-3 text-xs text-muted-foreground hover:text-foreground transition-colors rounded-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2"
                       onClick={() => setShowMoreAdapters((v) => !v)}
                     >
                       <ChevronDown
@@ -801,14 +842,17 @@ export function OnboardingWizard() {
                         {moreAdapters.map((opt) => (
                            <button
                              key={opt.type}
+                             type="button"
+                             role="radio"
+                             aria-checked={adapterType === opt.type}
                              disabled={!!opt.comingSoon}
                              className={cn(
-                               "flex flex-col items-center gap-1.5 rounded-md border p-3 text-xs transition-colors relative",
+                               "flex flex-col items-center gap-1.5 rounded-md border p-3 text-xs transition-colors relative focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2",
                                opt.comingSoon
-                                 ? "border-border opacity-40 cursor-not-allowed"
+                                 ? "border-input opacity-40 cursor-not-allowed"
                                  : adapterType === opt.type
                                  ? "border-foreground bg-accent"
-                                 : "border-border hover:bg-accent/50"
+                                 : "border-input hover:bg-accent/50"
                              )}
                              onClick={() => {
                                if (opt.comingSoon) return;
@@ -848,9 +892,12 @@ export function OnboardingWizard() {
                   {isLocalAdapter && (
                     <div className="space-y-3">
                       <div>
-                        <label className="text-xs text-muted-foreground mb-1 block">
+                        <div
+                          id="onboarding-model-label"
+                          className="text-xs text-muted-foreground mb-1 block"
+                        >
                           Model
-                        </label>
+                        </div>
                         <Popover
                           open={modelOpen}
                           onOpenChange={(next) => {
@@ -859,7 +906,13 @@ export function OnboardingWizard() {
                           }}
                         >
                           <PopoverTrigger asChild>
-                            <button className="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-sm hover:bg-accent/50 transition-colors w-full justify-between">
+                            <button
+                              type="button"
+                              aria-labelledby="onboarding-model-label"
+                              aria-haspopup="listbox"
+                              aria-expanded={modelOpen}
+                              className="inline-flex items-center gap-1.5 rounded-md border border-input px-2.5 py-1.5 text-sm hover:bg-accent/50 transition-colors w-full justify-between focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2"
+                            >
                               <span
                                 className={cn(
                                   !model && "text-muted-foreground"
@@ -880,7 +933,8 @@ export function OnboardingWizard() {
                             align="start"
                           >
                             <input
-                              className="w-full px-2 py-1.5 text-xs bg-transparent outline-none border-b border-border mb-1 placeholder:text-muted-foreground/50"
+                              aria-label="Search models"
+                              className="w-full px-2 py-1.5 text-xs bg-transparent border-b border-input mb-1 placeholder:text-muted-foreground/70 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 rounded-sm"
                               placeholder="Search models..."
                               value={modelSearch}
                               onChange={(e) => setModelSearch(e.target.value)}
@@ -888,8 +942,9 @@ export function OnboardingWizard() {
                             />
                             {adapterType !== "opencode_local" && (
                               <button
+                                type="button"
                                 className={cn(
-                                  "flex items-center gap-2 w-full px-2 py-1.5 text-sm rounded hover:bg-accent/50",
+                                  "flex items-center gap-2 w-full px-2 py-1.5 text-sm rounded hover:bg-accent/50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2",
                                   !model && "bg-accent"
                                 )}
                                 onClick={() => {
@@ -914,8 +969,9 @@ export function OnboardingWizard() {
                                   {group.entries.map((m) => (
                                     <button
                                       key={m.id}
+                                      type="button"
                                       className={cn(
-                                        "flex items-center w-full px-2 py-1.5 text-sm rounded hover:bg-accent/50",
+                                        "flex items-center w-full px-2 py-1.5 text-sm rounded hover:bg-accent/50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2",
                                         m.id === model && "bg-accent"
                                       )}
                                       onClick={() => {
@@ -948,7 +1004,7 @@ export function OnboardingWizard() {
                   )}
 
                   {isLocalAdapter && (
-                    <div className="space-y-2 rounded-md border border-border p-3">
+                    <div className="space-y-2 rounded-md border border-input p-3">
                       <div className="flex items-center justify-between gap-2">
                         <div>
                           <p className="text-xs font-medium">
@@ -1068,13 +1124,17 @@ export function OnboardingWizard() {
                   {(adapterType === "http" ||
                     adapterType === "openclaw_gateway") && (
                     <div>
-                      <label className="text-xs text-muted-foreground mb-1 block">
+                      <label
+                        htmlFor="onboarding-adapter-url"
+                        className="text-xs text-muted-foreground mb-1 block"
+                      >
                         {adapterType === "openclaw_gateway"
                           ? "Gateway URL"
                           : "Webhook URL"}
                       </label>
                       <input
-                        className="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm font-mono outline-none focus:ring-1 focus:ring-ring placeholder:text-muted-foreground/50"
+                        id="onboarding-adapter-url"
+                        className="w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm font-mono placeholder:text-muted-foreground/70 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2"
                         placeholder={
                           adapterType === "openclaw_gateway"
                             ? "ws://127.0.0.1:18789"
@@ -1103,11 +1163,15 @@ export function OnboardingWizard() {
                     </div>
                   </div>
                   <div>
-                    <label className="text-xs text-muted-foreground mb-1 block">
+                    <label
+                      htmlFor="onboarding-task-title"
+                      className="text-xs text-muted-foreground mb-1 block"
+                    >
                       Task title
                     </label>
                     <input
-                      className="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-ring placeholder:text-muted-foreground/50"
+                      id="onboarding-task-title"
+                      className="w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm placeholder:text-muted-foreground/70 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2"
                       placeholder="e.g. Research competitor pricing"
                       value={taskTitle}
                       onChange={(e) => setTaskTitle(e.target.value)}
@@ -1115,12 +1179,16 @@ export function OnboardingWizard() {
                     />
                   </div>
                   <div>
-                    <label className="text-xs text-muted-foreground mb-1 block">
+                    <label
+                      htmlFor="onboarding-task-description"
+                      className="text-xs text-muted-foreground mb-1 block"
+                    >
                       Description (optional)
                     </label>
                     <textarea
+                      id="onboarding-task-description"
                       ref={textareaRef}
-                      className="w-full rounded-md border border-border bg-transparent px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-ring placeholder:text-muted-foreground/50 resize-none min-h-[120px] max-h-[300px] overflow-y-auto"
+                      className="w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm placeholder:text-muted-foreground/70 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 resize-none min-h-[120px] max-h-[300px] overflow-y-auto"
                       placeholder="Add more detail about what the agent should do..."
                       value={taskDescription}
                       onChange={(e) => setTaskDescription(e.target.value)}
