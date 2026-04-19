@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import type { Db } from "@paperclipai/db";
 import type { DeploymentExposure, DeploymentMode } from "@paperclipai/shared";
 import type { StorageService } from "./storage/types.js";
-import { httpLogger, errorHandler } from "./middleware/index.js";
+import { httpLogger, errorHandler, securityHeaders } from "./middleware/index.js";
 import { actorMiddleware } from "./middleware/auth.js";
 import { boardMutationGuard } from "./middleware/board-mutation-guard.js";
 import { privateHostnameGuard, resolvePrivateHostnameAllowSet } from "./middleware/private-hostname-guard.js";
@@ -126,6 +126,11 @@ export async function createApp(
 ) {
   const app = express();
 
+  // Suppress the default Express `X-Powered-By: Express` response header.
+  // Part of GHSA-gqqj-85qm-8qhf (QA Issue #6) defense-in-depth remediation:
+  // the header leaks server fingerprinting data with no functional value.
+  app.disable("x-powered-by");
+
   app.use(express.json({
     // Company import/export payloads can inline full portable packages.
     limit: "10mb",
@@ -134,6 +139,13 @@ export async function createApp(
     },
   }));
   app.use(httpLogger);
+  // Emit defense-in-depth security response headers on every response.
+  // Addresses QA Issues #2–#5 from GHSA-gqqj-85qm-8qhf remediation.
+  // Registered after `httpLogger` so that request-scoped logging sees
+  // an untouched request, and before all authorization / routing
+  // middleware so the headers are set on every response, including
+  // error responses emitted by `errorHandler`.
+  app.use(securityHeaders());
   const privateHostnameGateEnabled = shouldEnablePrivateHostnameGuard({
     deploymentMode: opts.deploymentMode,
     deploymentExposure: opts.deploymentExposure,

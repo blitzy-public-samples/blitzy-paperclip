@@ -475,4 +475,265 @@ describe("prepareManagedCodexHome (GHSA-gqqj-85qm-8qhf)", () => {
       expect(log).toContain("allowWrite=[none]");
     });
   });
+
+  describe("adversarial connector-name injection (Issue #1 hardening)", () => {
+    it("rejects a connector name containing a newline and emits a count-only rejection log", async () => {
+      await seedSourceFile("config.toml", ['model = "gpt-5-codex"', ""].join("\n"));
+
+      await prepareManagedCodexHome(makeEnv(), onLog, undefined, {
+        allowRead: ["good\n[malicious]"],
+        allowWrite: [],
+      });
+
+      // Exactly one rejection log is emitted for allowRead with the count-only format.
+      const log = stdoutLog();
+      expect(log).toMatch(
+        /\[paperclip\] rejected 1 invalid allowRead connector name\(s\) \(must match \[a-zA-Z0-9\._-\]\+ and be <= 128 chars\)/,
+      );
+
+      // Provenance log shows the rejected name filtered out, so allowRead resolves to `none`.
+      expect(log).toContain("allowRead=[none]");
+      expect(log).toContain("allowWrite=[none]");
+
+      // Managed config.toml must NOT contain any injected TOML section header derived
+      // from the hostile name (neither the injected [malicious] nor a partial [apps.good... block).
+      const managed = await readManagedConfigToml();
+      expect(managed).toContain('model = "gpt-5-codex"');
+      expect(managed).not.toMatch(/^\[malicious\]/m);
+      expect(managed).not.toMatch(/^\[apps\.good/m);
+    });
+
+    it("rejects a connector name containing a null byte", async () => {
+      await seedSourceFile("config.toml", ['model = "gpt-5-codex"', ""].join("\n"));
+
+      await prepareManagedCodexHome(makeEnv(), onLog, undefined, {
+        allowRead: ["bad\u0000name"],
+        allowWrite: [],
+      });
+
+      const log = stdoutLog();
+      expect(log).toMatch(
+        /\[paperclip\] rejected 1 invalid allowRead connector name\(s\)/,
+      );
+      expect(log).toContain("allowRead=[none]");
+
+      const managed = await readManagedConfigToml();
+      expect(managed).not.toMatch(/^\[apps\.bad/m);
+    });
+
+    it("rejects a connector name containing a double-quote character", async () => {
+      await seedSourceFile("config.toml", ['model = "gpt-5-codex"', ""].join("\n"));
+
+      await prepareManagedCodexHome(makeEnv(), onLog, undefined, {
+        allowRead: ['bad"name'],
+        allowWrite: [],
+      });
+
+      const log = stdoutLog();
+      expect(log).toMatch(
+        /\[paperclip\] rejected 1 invalid allowRead connector name\(s\)/,
+      );
+      expect(log).toContain("allowRead=[none]");
+
+      const managed = await readManagedConfigToml();
+      expect(managed).not.toMatch(/^\[apps\.bad/m);
+    });
+
+    it("rejects a connector name containing an internal space character", async () => {
+      await seedSourceFile("config.toml", ['model = "gpt-5-codex"', ""].join("\n"));
+
+      await prepareManagedCodexHome(makeEnv(), onLog, undefined, {
+        allowRead: ["bad name"],
+        allowWrite: [],
+      });
+
+      const log = stdoutLog();
+      expect(log).toMatch(
+        /\[paperclip\] rejected 1 invalid allowRead connector name\(s\)/,
+      );
+      expect(log).toContain("allowRead=[none]");
+
+      const managed = await readManagedConfigToml();
+      expect(managed).not.toMatch(/^\[apps\.bad/m);
+    });
+
+    it("rejects a connector name containing square-bracket TOML metacharacters", async () => {
+      await seedSourceFile("config.toml", ['model = "gpt-5-codex"', ""].join("\n"));
+
+      await prepareManagedCodexHome(makeEnv(), onLog, undefined, {
+        allowRead: ["bad[name]"],
+        allowWrite: [],
+      });
+
+      const log = stdoutLog();
+      expect(log).toMatch(
+        /\[paperclip\] rejected 1 invalid allowRead connector name\(s\)/,
+      );
+      expect(log).toContain("allowRead=[none]");
+
+      const managed = await readManagedConfigToml();
+      expect(managed).not.toMatch(/^\[apps\.bad/m);
+    });
+
+    it("rejects a connector name longer than 128 characters", async () => {
+      await seedSourceFile("config.toml", ['model = "gpt-5-codex"', ""].join("\n"));
+
+      const tooLong = "a".repeat(129);
+
+      await prepareManagedCodexHome(makeEnv(), onLog, undefined, {
+        allowRead: [tooLong],
+        allowWrite: [],
+      });
+
+      const log = stdoutLog();
+      expect(log).toMatch(
+        /\[paperclip\] rejected 1 invalid allowRead connector name\(s\)/,
+      );
+      expect(log).toContain("allowRead=[none]");
+
+      // The oversized name MUST NOT appear anywhere in managed config.toml.
+      const managed = await readManagedConfigToml();
+      expect(managed).not.toContain(tooLong);
+    });
+
+    it("accepts a connector name of exactly 128 characters and appends [apps.<name>] enabled = true", async () => {
+      await seedSourceFile("config.toml", ['model = "gpt-5-codex"', ""].join("\n"));
+
+      // All "a" characters — no regex metacharacters to escape.
+      const exactly128 = "a".repeat(128);
+
+      await prepareManagedCodexHome(makeEnv(), onLog, undefined, {
+        allowRead: [exactly128],
+        allowWrite: [],
+      });
+
+      // No rejection log is emitted for the boundary-valid length.
+      const log = stdoutLog();
+      expect(log).not.toMatch(/rejected \d+ invalid allowRead/);
+      expect(log).toContain(`allowRead=[${exactly128}]`);
+
+      // Valid 128-char name produces an [apps.<name>] block via the append path.
+      const managed = await readManagedConfigToml();
+      expect(managed).toMatch(new RegExp(`^\\[apps\\.${exactly128}\\]$`, "m"));
+      expect(managed).toMatch(/^enabled = true$/m);
+    });
+
+    it("rejects non-string values inside the allowRead array", async () => {
+      await seedSourceFile("config.toml", ['model = "gpt-5-codex"', ""].join("\n"));
+
+      await prepareManagedCodexHome(makeEnv(), onLog, undefined, {
+        // Hostile payload: number, plain object, and null must all be rejected by
+        // the boundary validator (counted, not silently skipped).
+        allowRead: [42, {}, null] as unknown as string[],
+        allowWrite: [],
+      });
+
+      const log = stdoutLog();
+      expect(log).toMatch(
+        /\[paperclip\] rejected 3 invalid allowRead connector name\(s\)/,
+      );
+      expect(log).toContain("allowRead=[none]");
+    });
+
+    it("silently skips empty and whitespace-only strings without emitting any rejection log", async () => {
+      await seedSourceFile("config.toml", ['model = "gpt-5-codex"', ""].join("\n"));
+
+      await prepareManagedCodexHome(makeEnv(), onLog, undefined, {
+        allowRead: ["", "   ", "\t"],
+        allowWrite: [],
+      });
+
+      // Empty/whitespace-only strings are silently skipped — NO rejection log emitted.
+      const log = stdoutLog();
+      expect(log).not.toMatch(/rejected \d+ invalid allowRead/);
+      expect(log).not.toMatch(/rejected \d+ invalid allowWrite/);
+      expect(log).toContain("allowRead=[none]");
+      expect(log).toContain("allowWrite=[none]");
+    });
+
+    it("filters a mixed list to valid names only and emits a single rejection log for the invalid ones", async () => {
+      await seedSourceFile("config.toml", ['model = "gpt-5-codex"', ""].join("\n"));
+
+      await prepareManagedCodexHome(makeEnv(), onLog, undefined, {
+        allowRead: ["gmail", "bad\n[evil]", "drive"],
+        allowWrite: [],
+      });
+
+      const log = stdoutLog();
+      // Exactly one rejection (the newline-bearing entry).
+      expect(log).toMatch(
+        /\[paperclip\] rejected 1 invalid allowRead connector name\(s\)/,
+      );
+      // Provenance log lists the valid names in input order (comma-separated, no spaces).
+      expect(log).toMatch(/allowRead=\[gmail,drive\]/);
+
+      // Both valid connectors get [apps.<name>] blocks; the invalid one does not leak.
+      const managed = await readManagedConfigToml();
+      expect(managed).toMatch(/^\[apps\.gmail\]$/m);
+      expect(managed).toMatch(/^\[apps\.drive\]$/m);
+      expect(managed).not.toMatch(/^\[evil\]/m);
+      expect(managed).not.toMatch(/^\[apps\.bad/m);
+    });
+
+    it("does not echo the raw invalid payload into the rejection log (count-only defense against log injection)", async () => {
+      await seedSourceFile("config.toml", ['model = "gpt-5-codex"', ""].join("\n"));
+
+      await prepareManagedCodexHome(makeEnv(), onLog, undefined, {
+        allowRead: ["bad\n[evil]"],
+        allowWrite: [],
+      });
+
+      const log = stdoutLog();
+      expect(log).toMatch(
+        /\[paperclip\] rejected 1 invalid allowRead connector name\(s\) \(must match \[a-zA-Z0-9\._-\]\+ and be <= 128 chars\)/,
+      );
+      // The hostile payload substring MUST NOT appear anywhere in the emitted logs.
+      expect(log).not.toContain("[evil]");
+      expect(log).not.toContain("bad\n[evil]");
+    });
+
+    it("treats a non-array allowRead value as empty and emits no warnings", async () => {
+      await seedSourceFile("config.toml", ['model = "gpt-5-codex"', ""].join("\n"));
+
+      await prepareManagedCodexHome(makeEnv(), onLog, undefined, {
+        // Hostile payload: a caller may supply a string where an array is required.
+        // Runtime must defensively treat this as empty (no rejection log emitted).
+        allowRead: "gmail" as unknown as string[],
+        allowWrite: [],
+      });
+
+      const log = stdoutLog();
+      expect(log).not.toMatch(/rejected \d+ invalid allowRead/);
+      expect(log).toContain("allowRead=[none]");
+      expect(log).toContain("allowWrite=[none]");
+    });
+
+    it("validates allowWrite independently from allowRead (two separate rejection logs possible)", async () => {
+      await seedSourceFile("config.toml", ['model = "gpt-5-codex"', ""].join("\n"));
+
+      await prepareManagedCodexHome(makeEnv(), onLog, undefined, {
+        allowRead: ["bad\n[attacker_read]"],
+        allowWrite: ["bad\n[attacker_write]"],
+      });
+
+      const log = stdoutLog();
+      // Two DISTINCT rejection logs — one per list.
+      expect(log).toMatch(
+        /\[paperclip\] rejected 1 invalid allowRead connector name\(s\)/,
+      );
+      expect(log).toMatch(
+        /\[paperclip\] rejected 1 invalid allowWrite connector name\(s\)/,
+      );
+
+      // Both provenance fields show `none` because every supplied name was rejected.
+      expect(log).toContain("allowRead=[none]");
+      expect(log).toContain("allowWrite=[none]");
+
+      // Neither hostile payload leaks into managed config.toml.
+      const managed = await readManagedConfigToml();
+      expect(managed).not.toMatch(/^\[attacker_read\]/m);
+      expect(managed).not.toMatch(/^\[attacker_write\]/m);
+      expect(managed).not.toMatch(/^\[apps\.bad/m);
+    });
+  });
 });

@@ -11,6 +11,74 @@ const COPIED_SHARED_FILES = ["config.json", "config.toml", "instructions.md"] as
 const SYMLINKED_SHARED_FILES = ["auth.json"] as const;
 const DEFAULT_PAPERCLIP_INSTANCE_ID = "default";
 
+// GHSA-gqqj-85qm-8qhf — defense-in-depth at the manifest-sanitization boundary.
+//
+// Connector names supplied via `inheritedConnectors.allowRead` / `allowWrite`
+// flow into the managed `config.toml` as `[apps.<name>]` section headers and
+// into stdout provenance logs. Although the authoritative runtime gate in
+// `execute.ts` already fails closed for any invocation whose connector name is
+// not in the opt-in set, unvalidated names containing TOML metadata characters
+// (`]`, `[`, `"`, newline, `\0`, whitespace) could produce malformed or
+// attacker-controlled TOML output and could corrupt the provenance log. This
+// validator rejects such names at the `prepareManagedCodexHome` boundary with
+// a warning log, preserving the "default-deny" posture (rejected names simply
+// do not appear in the sanitized manifest, so any invocation against them is
+// denied at runtime).
+//
+// The allowed character set covers the documented connector naming conventions
+// for both OpenAI-curated connectors (e.g., `gmail`, `gcal`, `drive`, `github`,
+// `linear`) and paperclip-native connectors (e.g., `acme.linear`). Lengths are
+// bounded to protect against pathological inputs.
+const VALID_CONNECTOR_NAME_RE = /^[a-zA-Z0-9._-]+$/;
+const MAX_CONNECTOR_NAME_LENGTH = 128;
+
+/**
+ * Filter a list of connector names supplied via `inheritedConnectors.allowRead`
+ * or `inheritedConnectors.allowWrite`, keeping only names that match the
+ * `VALID_CONNECTOR_NAME_RE` allowlist and are within the length bound. Invalid
+ * names (including those containing TOML metadata characters that could inject
+ * arbitrary TOML sections, or newlines that could corrupt provenance logs) are
+ * dropped and a warning is emitted via `onLog` (without echoing the raw invalid
+ * value, to avoid log-injection propagation).
+ *
+ * Returns a new array; does not mutate the input.
+ */
+function filterValidConnectorNames(
+  names: unknown,
+  kind: "allowRead" | "allowWrite",
+  onLog: AdapterExecutionContext["onLog"],
+): string[] {
+  if (!Array.isArray(names)) return [];
+  const valid: string[] = [];
+  let rejectedCount = 0;
+  for (const candidate of names) {
+    if (typeof candidate !== "string") {
+      rejectedCount += 1;
+      continue;
+    }
+    const trimmed = candidate.trim();
+    if (trimmed.length === 0) continue;
+    if (trimmed.length > MAX_CONNECTOR_NAME_LENGTH) {
+      rejectedCount += 1;
+      continue;
+    }
+    if (!VALID_CONNECTOR_NAME_RE.test(trimmed)) {
+      rejectedCount += 1;
+      continue;
+    }
+    valid.push(trimmed);
+  }
+  if (rejectedCount > 0) {
+    // Emit count-only warning; do not echo raw invalid values into the log
+    // stream (they may themselves contain log-corruption characters).
+    void onLog(
+      "stdout",
+      `[paperclip] rejected ${rejectedCount} invalid ${kind} connector name(s) (must match [a-zA-Z0-9._-]+ and be <= ${MAX_CONNECTOR_NAME_LENGTH} chars)\n`,
+    );
+  }
+  return valid;
+}
+
 function nonEmpty(value: string | undefined): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
@@ -309,13 +377,26 @@ export async function prepareManagedCodexHome(
     await ensureCopiedFile(path.join(targetHome, name), source);
   }
 
+  // GHSA-gqqj-85qm-8qhf — boundary validation for user-supplied connector
+  // names. Reject names containing TOML metadata characters or newlines BEFORE
+  // they flow into `config.toml` section headers or the provenance log below.
+  // The authoritative runtime gate in `execute.ts` still fails closed for any
+  // invocation not matching the opt-in set, so rejected names simply do not
+  // appear in the sanitized manifest — preserving the default-deny posture.
+  const sanitizedConnectors: InheritedConnectorsConfig | undefined = inheritedConnectors
+    ? {
+        allowRead: filterValidConnectorNames(inheritedConnectors.allowRead, "allowRead", onLog),
+        allowWrite: filterValidConnectorNames(inheritedConnectors.allowWrite, "allowWrite", onLog),
+      }
+    : undefined;
+
   // GHSA-gqqj-85qm-8qhf — sanitize the copied `config.toml` to strip
   // OpenAI-curated connector entries (default-deny). Re-enable only the
   // connectors explicitly listed in `inheritedConnectors.allowRead` or
   // `inheritedConnectors.allowWrite`. The managed CODEX_HOME must not present
   // inherited connector state to the spawned Codex CLI unless the agent
   // opted in. This runs AFTER the copy loop so the config file exists.
-  await sanitizeCopiedCodexConfig(targetHome, inheritedConnectors);
+  await sanitizeCopiedCodexConfig(targetHome, sanitizedConnectors);
 
   await onLog(
     "stdout",
@@ -323,9 +404,10 @@ export async function prepareManagedCodexHome(
   );
 
   // GHSA-gqqj-85qm-8qhf — companion log line naming the current opt-in state
-  // for observability and forensic replay.
-  const allowReadList = inheritedConnectors?.allowRead ?? [];
-  const allowWriteList = inheritedConnectors?.allowWrite ?? [];
+  // for observability and forensic replay. Uses the post-validation
+  // `sanitizedConnectors` to prevent log-injection via malicious names.
+  const allowReadList = sanitizedConnectors?.allowRead ?? [];
+  const allowWriteList = sanitizedConnectors?.allowWrite ?? [];
   await onLog(
     "stdout",
     `[paperclip] codex_local inherited connectors: ` +
